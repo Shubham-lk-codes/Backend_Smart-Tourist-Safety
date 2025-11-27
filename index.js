@@ -2,6 +2,7 @@ const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
 const morgan = require('morgan');
+const geoRoutes = require("./routes/geoRoutes");
 require('dotenv').config();
 
 const app = express();
@@ -17,6 +18,7 @@ app.use(express.json());
 app.get('/', (req, res) => {
   res.json({ message: 'Hello Express!' });
 });
+app.use("/api/geo", geoRoutes);
 
 // Start server
 app.listen(PORT, () => {
