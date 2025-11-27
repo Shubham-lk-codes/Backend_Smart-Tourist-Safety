@@ -2,9 +2,12 @@ const UserManager = require('../blockchain/UserManager');
 
 const userManager = new UserManager();
 
+// Initialize when server starts
+userManager.initialize().catch(console.error);
+
 const userController = {
   // Register new user
-  registerUser: (req, res) => {
+  registerUser: async (req, res) => {
     try {
       const { name, email, phone, location } = req.body;
 
@@ -18,11 +21,10 @@ const userController = {
         name,
         email,
         phone: phone || '',
-        location: location || '',
-        registeredAt: new Date().toISOString()
+        location: location || ''
       };
 
-      const user = userManager.registerUser(userData);
+      const user = await userManager.registerUser(userData);
 
       res.status(201).json({
         message: 'User registered successfully',
@@ -38,16 +40,16 @@ const userController = {
     } catch (error) {
       console.error('Error registering user:', error);
       res.status(500).json({
-        error: 'Internal server error'
+        error: 'Internal server error: ' + error.message
       });
     }
   },
 
   // Get user details
-  getUser: (req, res) => {
+  getUser: async (req, res) => {
     try {
       const { userId } = req.params;
-      const verification = userManager.verifyUser(userId);
+      const verification = await userManager.verifyUser(userId);
 
       if (!verification.verified) {
         return res.status(404).json({
@@ -69,7 +71,7 @@ const userController = {
   },
 
   // Add user activity
-  addActivity: (req, res) => {
+  addActivity: async (req, res) => {
     try {
       const { userId } = req.params;
       const { activityType, details } = req.body;
@@ -80,7 +82,7 @@ const userController = {
         });
       }
 
-      const activity = userManager.addUserActivity(userId, activityType, details);
+      const activity = await userManager.addUserActivity(userId, activityType, details);
 
       res.json({
         message: 'Activity recorded successfully',
@@ -97,18 +99,18 @@ const userController = {
   },
 
   // Get user activities
-  getActivities: (req, res) => {
+  getActivities: async (req, res) => {
     try {
       const { userId } = req.params;
-      const activities = userManager.getUserActivities(userId);
+      const activities = await userManager.getUserActivities(userId);
 
       res.json({
         userId,
-        activities: activities.map(block => ({
-          activityType: block.data.action,
-          details: block.data.details,
-          timestamp: block.timestamp,
-          blockHash: block.hash
+        activities: activities.map(activity => ({
+          activityType: activity.activityType,
+          details: activity.details,
+          timestamp: activity.timestamp,
+          blockHash: activity.blockHash
         }))
       });
     } catch (error) {
@@ -120,10 +122,10 @@ const userController = {
   },
 
   // Get all users
-  getAllUsers: (req, res) => {
+  getAllUsers: async (req, res) => {
     try {
-      const users = userManager.getAllUsers();
-      const stats = userManager.getBlockchainStats();
+      const users = await userManager.getAllUsers();
+      const stats = await userManager.getBlockchainStats();
 
       res.json({
         stats,
@@ -144,9 +146,9 @@ const userController = {
   },
 
   // Get blockchain info
-  getBlockchainInfo: (req, res) => {
+  getBlockchainInfo: async (req, res) => {
     try {
-      const stats = userManager.getBlockchainStats();
+      const stats = await userManager.getBlockchainStats();
       res.json(stats);
     } catch (error) {
       console.error('Error getting blockchain info:', error);

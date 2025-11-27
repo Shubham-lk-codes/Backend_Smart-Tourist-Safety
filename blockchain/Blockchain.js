@@ -1,25 +1,52 @@
 const Block = require('./Block');
+const BlockModel = require('../models/Block');
 
 class Blockchain {
   constructor() {
-    this.chain = [this.createGenesisBlock()];
     this.difficulty = 2;
-    this.pendingUsers = [];
   }
 
-  createGenesisBlock() {
-    return new Block(Date.now(), { 
-      userId: 'genesis',
-      action: 'genesis',
-      details: 'First block in the chain'
-    }, '0');
+  async initialize() {
+    // Check if genesis block exists
+    const genesisExists = await BlockModel.findOne({ index: 0 });
+    if (!genesisExists) {
+      await this.createGenesisBlock();
+    }
   }
 
-  getLatestBlock() {
-    return this.chain[this.chain.length - 1];
+  async createGenesisBlock() {
+    const genesisBlock = new Block(
+      Date.now(), 
+      { 
+        userId: 'genesis',
+        action: 'genesis',
+        details: 'First block in the chain'
+      }, 
+      '0'
+    );
+    
+    genesisBlock.mineBlock(this.difficulty);
+    
+    const savedBlock = new BlockModel({
+      blockId: genesisBlock.id,
+      timestamp: genesisBlock.timestamp,
+      data: genesisBlock.data,
+      previousHash: genesisBlock.previousHash,
+      hash: genesisBlock.hash,
+      nonce: genesisBlock.nonce,
+      index: 0
+    });
+    
+    await savedBlock.save();
+    console.log('Genesis block created and saved to MongoDB');
   }
 
-  createUserBlock(userData) {
+  async getLatestBlock() {
+    return await BlockModel.findOne().sort({ index: -1 });
+  }
+
+  async createUserBlock(userData) {
+    const latestBlock = await this.getLatestBlock();
     const newBlock = new Block(
       Date.now(),
       {
@@ -27,15 +54,27 @@ class Blockchain {
         action: 'user_registration',
         details: userData
       },
-      this.getLatestBlock().hash
+      latestBlock.hash
     );
     
     newBlock.mineBlock(this.difficulty);
-    this.chain.push(newBlock);
-    return newBlock;
+    
+    const savedBlock = new BlockModel({
+      blockId: newBlock.id,
+      timestamp: newBlock.timestamp,
+      data: newBlock.data,
+      previousHash: newBlock.previousHash,
+      hash: newBlock.hash,
+      nonce: newBlock.nonce,
+      index: latestBlock.index + 1
+    });
+    
+    await savedBlock.save();
+    return savedBlock;
   }
 
-  addUserAction(userId, action, details) {
+  async addUserAction(userId, action, details) {
+    const latestBlock = await this.getLatestBlock();
     const newBlock = new Block(
       Date.now(),
       {
@@ -43,20 +82,41 @@ class Blockchain {
         action,
         details
       },
-      this.getLatestBlock().hash
+      latestBlock.hash
     );
     
     newBlock.mineBlock(this.difficulty);
-    this.chain.push(newBlock);
-    return newBlock;
+    
+    const savedBlock = new BlockModel({
+      blockId: newBlock.id,
+      timestamp: newBlock.timestamp,
+      data: newBlock.data,
+      previousHash: newBlock.previousHash,
+      hash: newBlock.hash,
+      nonce: newBlock.nonce,
+      index: latestBlock.index + 1
+    });
+    
+    await savedBlock.save();
+    return savedBlock;
   }
 
-  isChainValid() {
-    for (let i = 1; i < this.chain.length; i++) {
-      const currentBlock = this.chain[i];
-      const previousBlock = this.chain[i - 1];
+  async isChainValid() {
+    const blocks = await BlockModel.find().sort({ index: 1 });
+    
+    for (let i = 1; i < blocks.length; i++) {
+      const currentBlock = blocks[i];
+      const previousBlock = blocks[i - 1];
 
-      if (currentBlock.hash !== currentBlock.calculateHash()) {
+      // Recalculate hash
+      const block = new Block(
+        currentBlock.timestamp,
+        currentBlock.data,
+        currentBlock.previousHash
+      );
+      block.nonce = currentBlock.nonce;
+      
+      if (currentBlock.hash !== block.calculateHash()) {
         return false;
       }
 
@@ -67,20 +127,25 @@ class Blockchain {
     return true;
   }
 
-  getUserHistory(userId) {
-    return this.chain.filter(block => 
-      block.data.userId === userId
-    );
+  async getUserHistory(userId) {
+    return await BlockModel.find({ 'data.userId': userId }).sort({ index: 1 });
   }
 
-  getAllUsers() {
-    const users = {};
-    this.chain.forEach(block => {
-      if (block.data.action === 'user_registration') {
-        users[block.data.userId] = block.data.details;
-      }
-    });
-    return users;
+  async getAllBlocks() {
+    return await BlockModel.find().sort({ index: 1 });
+  }
+
+  async getBlockchainStats() {
+    const totalBlocks = await BlockModel.countDocuments();
+    const latestBlock = await this.getLatestBlock();
+    const isValid = await this.isChainValid();
+    
+    return {
+      totalBlocks,
+      latestBlock: latestBlock ? latestBlock.hash : 'No blocks',
+      chainValid: isValid,
+      latestIndex: latestBlock ? latestBlock.index : 0
+    };
   }
 }
 

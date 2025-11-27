@@ -1,50 +1,57 @@
 const { v4: uuidv4 } = require('uuid');
 const Blockchain = require('./Blockchain');
+const User = require('../models/User');
+const Activity = require('../models/Activity');
 
 class UserManager {
   constructor() {
     this.blockchain = new Blockchain();
-    this.users = new Map(); // In-memory storage (use database in production)
+  }
+
+  async initialize() {
+    await this.blockchain.initialize();
   }
 
   generateUserId() {
     return `user_${uuidv4()}`;
   }
 
-  registerUser(userData) {
+  async registerUser(userData) {
     const userId = this.generateUserId();
     const userRecord = {
       userId,
       ...userData,
-      timestamp: new Date().toISOString(),
-      blockId: null
+      timestamp: new Date()
     };
 
     // Add to blockchain
-    const block = this.blockchain.createUserBlock(userRecord);
-    userRecord.blockId = block.id;
+    const block = await this.blockchain.createUserBlock(userRecord);
+    userRecord.blockId = block.blockId;
     userRecord.blockHash = block.hash;
 
-    // Store in memory
-    this.users.set(userId, userRecord);
+    // Save to MongoDB
+    const user = new User(userRecord);
+    await user.save();
 
     return userRecord;
   }
 
-  getUser(userId) {
-    return this.users.get(userId);
+  async getUser(userId) {
+    return await User.findOne({ userId });
   }
 
-  getAllUsers() {
-    return Array.from(this.users.values());
+  async getAllUsers() {
+    return await User.find({ isActive: true }).sort({ timestamp: -1 });
   }
 
-  verifyUser(userId) {
-    const user = this.getUser(userId);
-    if (!user) return { verified: false, reason: 'User not found' };
+  async verifyUser(userId) {
+    const user = await this.getUser(userId);
+    if (!user) {
+      return { verified: false, reason: 'User not found' };
+    }
 
     // Verify in blockchain
-    const userHistory = this.blockchain.getUserHistory(userId);
+    const userHistory = await this.blockchain.getUserHistory(userId);
     const registrationBlock = userHistory.find(block => 
       block.data.action === 'user_registration'
     );
@@ -53,50 +60,79 @@ class UserManager {
       return { verified: false, reason: 'User not found in blockchain' };
     }
 
+    const isValid = await this.blockchain.isChainValid();
+
     return { 
       verified: true, 
       user: user,
       blockData: registrationBlock.data,
-      blockchainVerified: this.blockchain.isChainValid()
+      blockchainVerified: isValid
     };
   }
 
-  addUserActivity(userId, activityType, details) {
-    const user = this.getUser(userId);
+  async addUserActivity(userId, activityType, details) {
+    const user = await this.getUser(userId);
     if (!user) {
       throw new Error('User not found');
     }
 
-    const activity = {
+    const activityData = {
       activityType,
       details,
-      timestamp: new Date().toISOString()
+      timestamp: new Date()
     };
 
     // Add to blockchain
-    const block = this.blockchain.addUserAction(userId, activityType, activity);
+    const block = await this.blockchain.addUserAction(userId, activityType, activityData);
     
+    // Save to Activity collection
+    const activity = new Activity({
+      userId,
+      activityType,
+      details,
+      blockId: block.blockId,
+      blockHash: block.hash,
+      timestamp: activityData.timestamp
+    });
+    
+    await activity.save();
+
     return {
-      activity,
-      blockId: block.id,
+      activity: activityData,
+      blockId: block.blockId,
       blockHash: block.hash
     };
   }
 
-  getUserActivities(userId) {
-    const history = this.blockchain.getUserHistory(userId);
-    return history.filter(block => 
-      block.data.action !== 'user_registration'
-    );
+  async getUserActivities(userId) {
+    return await Activity.find({ userId }).sort({ timestamp: -1 });
   }
 
-  getBlockchainStats() {
+  async getBlockchainStats() {
+    const userStats = await User.aggregate([
+      { $match: { isActive: true } },
+      { $count: 'totalUsers' }
+    ]);
+
+    const activityStats = await Activity.aggregate([
+      { $group: { _id: '$activityType', count: { $sum: 1 } } }
+    ]);
+
+    const blockchainStats = await this.blockchain.getBlockchainStats();
+
     return {
-      totalBlocks: this.blockchain.chain.length,
-      totalUsers: this.users.size,
-      chainValid: this.blockchain.isChainValid(),
-      latestBlock: this.blockchain.getLatestBlock().hash
+      ...blockchainStats,
+      totalUsers: userStats[0]?.totalUsers || 0,
+      activityTypes: activityStats
     };
+  }
+
+  async deactivateUser(userId) {
+    return await User.findOneAndUpdate(
+      { userId },
+      { isActive: false },
+      { new: true }
+    );
   }
 }
 
