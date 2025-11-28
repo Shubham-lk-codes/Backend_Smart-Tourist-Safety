@@ -10,13 +10,14 @@ const fenceConfig = {
         east: 77.2090,
         west: 77.2089
       },
-      radius: 1000, // meters
+      radius: 1, // meters
       center: {
         lat: 28.6139,
         lng: 77.2090
       }
     }
   ],
+  
   
   // Check if a point is within any geofence
   isPointInGeofence: function(lat, lng) {
