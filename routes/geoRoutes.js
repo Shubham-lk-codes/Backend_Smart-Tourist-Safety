@@ -1,15 +1,12 @@
-// routes/geoRoutes.js
 const express = require('express');
 const router = express.Router();
 const geoController = require('../controllers/geoController');
 
-// Check if location is within geofence
 router.get('/check', geoController.checkLocation);
-
-// Get all geofences
-router.get('/boundaries', geoController.getGeofences);
-
-// Add new geofence
-router.post('/add', geoController.addGeofence);
+router.get('/geofences', geoController.getGeofences);
+router.get('/nearest', geoController.findNearest);
+router.post('/geofences', geoController.addGeofence);
+router.put('/geofences/:id', geoController.updateGeofence);
+router.delete('/geofences/:id', geoController.deleteGeofence);
 
 module.exports = router;
