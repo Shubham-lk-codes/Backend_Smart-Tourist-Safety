@@ -31,6 +31,8 @@ mongoose.connect(MONGODB_URI)
 
 // WebSocket connections storage
 const connectedClients = new Map();
+// Emergency alerts storage
+const emergencyAlerts = new Map();
 
 wss.on('connection', (ws, req) => {
   const clientId = generateClientId();
@@ -39,7 +41,8 @@ wss.on('connection', (ws, req) => {
   connectedClients.set(ws, {
     id: clientId,
     connectedAt: new Date(),
-    location: null
+    location: null,
+    userType: 'tourist' // default, can be changed later
   });
 
   // Send welcome message
@@ -63,6 +66,21 @@ wss.on('connection', (ws, req) => {
         case 'ping':
           ws.send(JSON.stringify({ type: 'pong', timestamp: new Date().toISOString() }));
           break;
+        
+        // NEW: Handle panic alerts
+        case 'panic_alert':
+          handlePanicAlert(ws, data);
+          break;
+          
+        // NEW: Handle user type identification (police/tourist)
+        case 'identify_user':
+          handleUserIdentification(ws, data);
+          break;
+          
+        // NEW: Handle emergency acknowledgment from police
+        case 'emergency_acknowledged':
+          handleEmergencyAcknowledgment(ws, data);
+          break;
           
         default:
           console.log('Unknown message type:', data.type);
@@ -78,6 +96,9 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', (code, reason) => {
     console.log(`🔴 WebSocket disconnected: ${clientId} (Code: ${code})`);
+    
+    // Remove any emergency alerts from this client
+    removeClientEmergencyAlerts(clientId);
     connectedClients.delete(ws);
     
     // Notify other clients about user disconnect
@@ -90,6 +111,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('error', (error) => {
     console.error(`💥 WebSocket error for ${clientId}:`, error);
+    removeClientEmergencyAlerts(clientId);
     connectedClients.delete(ws);
   });
 
@@ -102,7 +124,144 @@ wss.on('connection', (ws, req) => {
   }, ws);
 });
 
-// WebSocket message handlers
+// NEW: Panic Alert Handler
+function handlePanicAlert(ws, panicData) {
+  const clientData = connectedClients.get(ws);
+  if (!clientData) return;
+
+  const alertId = `emergency_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  
+  const emergencyAlert = {
+    id: alertId,
+    clientId: clientData.id,
+    type: 'panic_alert',
+    location: panicData.location || clientData.location,
+    timestamp: new Date().toISOString(),
+    status: 'active',
+    acknowledged: false,
+    data: panicData.data || {}
+  };
+
+  // Store the alert
+  emergencyAlerts.set(alertId, emergencyAlert);
+  
+  console.log(`🚨 PANIC ALERT from ${clientData.id}:`, {
+    alertId: alertId,
+    location: emergencyAlert.location,
+    timestamp: emergencyAlert.timestamp
+  });
+
+  // Broadcast to ALL connected clients (including police)
+  broadcastToAll(emergencyAlert);
+
+  // Send acknowledgment back to tourist
+  ws.send(JSON.stringify({
+    type: 'panic_acknowledged',
+    alertId: alertId,
+    message: 'Emergency services have been notified. Help is on the way!',
+    timestamp: new Date().toISOString()
+  }));
+
+  // Log to database or external service
+  logEmergencyAlert(emergencyAlert);
+}
+
+// NEW: Handle user identification (police/tourist)
+function handleUserIdentification(ws, data) {
+  const clientData = connectedClients.get(ws);
+  if (clientData && data.userType) {
+    clientData.userType = data.userType;
+    console.log(`👤 User ${clientData.id} identified as: ${data.userType}`);
+    
+    // If police connects, send all active emergencies
+    if (data.userType === 'police') {
+      sendActiveEmergenciesToPolice(ws);
+    }
+  }
+}
+
+// NEW: Send all active emergencies to police when they connect
+function sendActiveEmergenciesToPolice(ws) {
+  emergencyAlerts.forEach((alert) => {
+    if (alert.status === 'active') {
+      ws.send(JSON.stringify(alert));
+    }
+  });
+  console.log(`📋 Sent ${emergencyAlerts.size} active emergencies to police`);
+}
+
+// NEW: Handle emergency acknowledgment from police
+function handleEmergencyAcknowledgment(ws, data) {
+  const clientData = connectedClients.get(ws);
+  const alert = emergencyAlerts.get(data.alertId);
+  
+  if (alert && clientData && clientData.userType === 'police') {
+    alert.status = 'acknowledged';
+    alert.acknowledged = true;
+    alert.acknowledgedBy = clientData.id;
+    alert.acknowledgedAt = new Date().toISOString();
+    
+    console.log(`✅ Emergency ${data.alertId} acknowledged by police: ${clientData.id}`);
+    
+    // Notify the original tourist who sent the alert
+    broadcastToUser(alert.clientId, {
+      type: 'emergency_acknowledged_by_authority',
+      alertId: alert.id,
+      acknowledgedBy: 'Police',
+      timestamp: new Date().toISOString(),
+      message: 'Police have acknowledged your emergency and are on the way!'
+    });
+    
+    // Broadcast update to all police
+    broadcastToPolice({
+      type: 'emergency_status_update',
+      alert: alert,
+      timestamp: new Date().toISOString()
+    });
+  }
+}
+
+// NEW: Broadcast to specific user
+function broadcastToUser(clientId, message) {
+  connectedClients.forEach((clientData, ws) => {
+    if (clientData.id === clientId && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(message));
+    }
+  });
+}
+
+// NEW: Broadcast only to police users
+function broadcastToPolice(message) {
+  connectedClients.forEach((clientData, ws) => {
+    if (clientData.userType === 'police' && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(message));
+    }
+  });
+}
+
+// NEW: Remove emergency alerts when client disconnects
+function removeClientEmergencyAlerts(clientId) {
+  emergencyAlerts.forEach((alert, alertId) => {
+    if (alert.clientId === clientId) {
+      emergencyAlerts.delete(alertId);
+    }
+  });
+}
+
+// NEW: Log emergency alert (you can save to MongoDB here)
+function logEmergencyAlert(alert) {
+  // Here you can save to MongoDB
+  console.log(`📊 LOGGED EMERGENCY: ${alert.id} from ${alert.clientId}`);
+  
+  // Example MongoDB save (uncomment if you have Emergency model)
+  /*
+  const Emergency = require('./models/Emergency');
+  const emergencyDoc = new Emergency(alert);
+  emergencyDoc.save().catch(err => console.error('Error saving emergency:', err));
+  */
+}
+
+// Existing WebSocket message handlers
 function handleLocationUpdate(ws, locationData) {
   const clientData = connectedClients.get(ws);
   if (clientData) {
@@ -120,8 +279,8 @@ function handleLocationUpdate(ws, locationData) {
     }, ws);
     
     console.log(`📍 Location update from ${clientData.id}:`, {
-      lat: locationData.lat.toFixed(6),
-      lng: locationData.lng.toFixed(6)
+      lat: locationData.lat?.toFixed(6),
+      lng: locationData.lng?.toFixed(6)
     });
   }
 }
@@ -155,6 +314,7 @@ setInterval(() => {
   const healthMessage = {
     type: 'health_check',
     userCount: connectedClients.size,
+    activeEmergencies: emergencyAlerts.size,
     timestamp: new Date().toISOString()
   };
 
@@ -163,10 +323,32 @@ setInterval(() => {
   // Clean up dead connections
   connectedClients.forEach((clientData, ws) => {
     if (ws.readyState !== WebSocket.OPEN) {
+      removeClientEmergencyAlerts(clientData.id);
       connectedClients.delete(ws);
     }
   });
 }, 30000); // Every 30 seconds
+
+// NEW: Emergency alerts cleanup (remove old alerts)
+setInterval(() => {
+  const now = new Date();
+  let cleanedCount = 0;
+  
+  emergencyAlerts.forEach((alert, alertId) => {
+    const alertTime = new Date(alert.timestamp);
+    const hoursDiff = (now - alertTime) / (1000 * 60 * 60);
+    
+    // Remove alerts older than 24 hours
+    if (hoursDiff > 24) {
+      emergencyAlerts.delete(alertId);
+      cleanedCount++;
+    }
+  });
+  
+  if (cleanedCount > 0) {
+    console.log(`🧹 Cleaned up ${cleanedCount} old emergency alerts`);
+  }
+}, 3600000); // Every hour
 
 // Middleware
 app.use(helmet());
@@ -182,20 +364,42 @@ app.get('/', (req, res) => {
     websocket: {
       enabled: true,
       connections: connectedClients.size,
+      activeEmergencies: emergencyAlerts.size,
       endpoint: 'ws://localhost:3000'
     },
     endpoints: {
       geo: '/api/geo',
       users: '/api/users',
-      blockchain: '/api/users/blockchain/info'
+      blockchain: '/api/users/blockchain/info',
+      emergencies: '/api/emergencies' // NEW endpoint
     }
   });
+});
+
+// NEW: Emergency alerts API endpoint
+app.get('/api/emergencies', (req, res) => {
+  const emergencies = Array.from(emergencyAlerts.values());
+  res.json({
+    activeEmergencies: emergencies.filter(e => e.status === 'active').length,
+    totalEmergencies: emergencies.length,
+    emergencies: emergencies
+  });
+});
+
+// NEW: Emergency alert by ID
+app.get('/api/emergencies/:id', (req, res) => {
+  const alert = emergencyAlerts.get(req.params.id);
+  if (!alert) {
+    return res.status(404).json({ error: 'Emergency alert not found' });
+  }
+  res.json(alert);
 });
 
 app.get('/websocket/status', (req, res) => {
   const clients = Array.from(connectedClients.entries()).map(([ws, data]) => ({
     id: data.id,
     connectedAt: data.connectedAt,
+    userType: data.userType,
     hasLocation: !!data.location,
     lastUpdate: data.location?.lastUpdate
   }));
@@ -203,6 +407,7 @@ app.get('/websocket/status', (req, res) => {
   res.json({
     websocketEnabled: true,
     activeConnections: connectedClients.size,
+    activeEmergencies: emergencyAlerts.size,
     clients: clients
   });
 });
@@ -216,18 +421,26 @@ app.get('/websocket/info', (req, res) => {
     websocketUrl: 'ws://localhost:3000',
     messageTypes: [
       'location_update',
-      'user_connected',
+      'user_connected', 
       'user_disconnected',
       'health_check',
-      'connection_established'
+      'connection_established',
+      'panic_alert', // NEW
+      'panic_acknowledged', // NEW
+      'identify_user', // NEW
+      'emergency_acknowledged', // NEW
+      'emergency_status_update' // NEW
     ],
-    exampleMessage: {
-      type: 'location_update',
+    examplePanicAlert: {
+      type: 'panic_alert',
+      location: {
+        latitude: 28.6139,
+        longitude: 77.2090,
+        accuracy: 10
+      },
       data: {
-        lat: 28.6139,
-        lng: 77.2090,
-        accuracy: 10,
-        timestamp: new Date().toISOString()
+        emergencyType: 'medical',
+        message: 'Need immediate help!'
       }
     }
   });
@@ -250,6 +463,7 @@ server.listen(PORT, () => {
   console.log(`🗄️  MongoDB: ${MONGODB_URI}`);
   console.log(`🔗 WebSocket server ready on ws://localhost:${PORT}`);
   console.log(`👥 Active WebSocket connections: ${connectedClients.size}`);
+  console.log(`🚨 Emergency alert system: ACTIVE`);
   console.log(`📱 Blockchain user system with MongoDB & WebSocket ready!`);
 });
 
@@ -272,5 +486,6 @@ module.exports = {
   app, 
   server,
   broadcastToAll,
-  getConnectedClients: () => connectedClients.size
+  getConnectedClients: () => connectedClients.size,
+  getEmergencyAlerts: () => emergencyAlerts.size // NEW export
 };
