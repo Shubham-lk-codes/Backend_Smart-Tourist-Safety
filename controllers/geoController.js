@@ -23,11 +23,11 @@ const geoController = {
       }
 
       const result = await fenceConfig.isPointInGeofence(latitude, longitude);
-      
+                                                                                                                                                        
       res.json({
         latitude,
         longitude,
-        inGeofence: result.inGeofence,
+        inGeofence: result.inGeofence,                                                                  
         boundary: result.boundary,
         geofence: result.geofence,
         message: result.inGeofence 
@@ -206,5 +206,6 @@ const geoController = {
     }
   }
 };
+
 
 module.exports = geoController;
