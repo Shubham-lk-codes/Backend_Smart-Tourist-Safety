@@ -1,5 +1,17 @@
-const fenceConfig = require('../geofence/fenceConfig');
 const Geofence = require('../models/Geofence');
+
+// Simple geofence check using Haversine formula
+const calculateDistance = (lat1, lon1, lat2, lon2) => {
+  const R = 6371000; // Earth's radius in meters
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+};
 
 const geoController = {
   // Check if location is within geofence
@@ -22,12 +34,41 @@ const geoController = {
         });
       }
 
-      const result = await fenceConfig.isPointInGeofence(latitude, longitude);
-                                                                                                                                                        
+      // Get all active geofences
+      const geofences = await Geofence.find({ isActive: true });
+      
+      let result = {
+        inGeofence: false,
+        boundary: null,
+        geofence: null
+      };
+
+      // Check each geofence
+      for (const geofence of geofences) {
+        if (geofence.type === 'circle') {
+          const distance = calculateDistance(
+            latitude, 
+            longitude, 
+            geofence.center.lat, 
+            geofence.center.lng
+          );
+          
+          if (distance <= geofence.radius) {
+            result = {
+              inGeofence: true,
+              boundary: geofence.name,
+              geofence: geofence
+            };
+            break;
+          }
+        }
+        // Add polygon checking logic here if needed
+      }
+
       res.json({
         latitude,
         longitude,
-        inGeofence: result.inGeofence,                                                                  
+        inGeofence: result.inGeofence,
         boundary: result.boundary,
         geofence: result.geofence,
         message: result.inGeofence 
@@ -37,7 +78,8 @@ const geoController = {
     } catch (error) {
       console.error('Error checking location:', error);
       res.status(500).json({
-        error: 'Internal server error'
+        error: 'Internal server error',
+        details: error.message
       });
     }
   },
@@ -52,7 +94,8 @@ const geoController = {
     } catch (error) {
       console.error('Error getting geofences:', error);
       res.status(500).json({
-        error: 'Internal server error'
+        error: 'Internal server error',
+        details: error.message
       });
     }
   },
@@ -95,7 +138,6 @@ const geoController = {
       });
 
       await newGeofence.save();
-      fenceConfig.clearCache(); // Clear cache after update
       
       res.status(201).json({
         message: 'Geofence added successfully',
@@ -104,7 +146,8 @@ const geoController = {
     } catch (error) {
       console.error('Error adding geofence:', error);
       res.status(500).json({
-        error: 'Internal server error'
+        error: 'Internal server error',
+        details: error.message
       });
     }
   },
@@ -126,8 +169,6 @@ const geoController = {
           error: 'Geofence not found'
         });
       }
-
-      fenceConfig.clearCache();
       
       res.json({
         message: 'Geofence updated successfully',
@@ -136,7 +177,8 @@ const geoController = {
     } catch (error) {
       console.error('Error updating geofence:', error);
       res.status(500).json({
-        error: 'Internal server error'
+        error: 'Internal server error',
+        details: error.message
       });
     }
   },
@@ -157,8 +199,6 @@ const geoController = {
           error: 'Geofence not found'
         });
       }
-
-      fenceConfig.clearCache();
       
       res.json({
         message: 'Geofence deleted successfully'
@@ -166,7 +206,8 @@ const geoController = {
     } catch (error) {
       console.error('Error deleting geofence:', error);
       res.status(500).json({
-        error: 'Internal server error'
+        error: 'Internal server error',
+        details: error.message
       });
     }
   },
@@ -191,21 +232,41 @@ const geoController = {
         });
       }
 
-      const nearest = await fenceConfig.findNearestGeofences(latitude, longitude, parseInt(limit));
+      const geofences = await Geofence.find({ isActive: true });
+      
+      // Calculate distances and sort
+      const geofencesWithDistance = geofences.map(geofence => {
+        let distance = Infinity;
+        
+        if (geofence.type === 'circle') {
+          distance = calculateDistance(
+            latitude, 
+            longitude, 
+            geofence.center.lat, 
+            geofence.center.lng
+          );
+          distance = Math.max(0, distance - geofence.radius); // Distance to boundary
+        }
+        
+        return {
+          ...geofence.toObject(),
+          distance
+        };
+      }).sort((a, b) => a.distance - b.distance).slice(0, parseInt(limit));
       
       res.json({
         latitude,
         longitude,
-        nearestGeofences: nearest
+        nearestGeofences: geofencesWithDistance
       });
     } catch (error) {
       console.error('Error finding nearest geofences:', error);
       res.status(500).json({
-        error: 'Internal server error'
+        error: 'Internal server error',
+        details: error.message
       });
     }
   }
 };
-
 
 module.exports = geoController;
