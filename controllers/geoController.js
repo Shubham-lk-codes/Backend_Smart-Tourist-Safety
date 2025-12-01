@@ -102,7 +102,7 @@ const geoController = {
     }
   },
 
-  // Add a new geofence - IMPROVED ERROR HANDLING WITH DEBUG LOGS
+  // Add a new geofence - FIXED VALIDATION AND ERROR HANDLING
   addGeofence: async (req, res) => {
     console.log('🆕 Received request to add new geofence');
     
@@ -117,35 +117,78 @@ const geoController = {
         coordinatesCount: coordinates ? coordinates.length : 0 
       });
       
-      // Validation
+      // Enhanced validation
       if (!name || !name.trim()) {
         console.log('❌ Validation failed: Zone name is required');
         return res.status(400).json({
           error: 'Zone name is required'
         });
       }
+      
 
+      // Validate type
+      if (!type || !['circle', 'polygon'].includes(type)) {
+        console.log('❌ Validation failed: Invalid geofence type');
+        return res.status(400).json({
+          error: 'Invalid geofence type. Must be "circle" or "polygon"'
+        });
+      }
+
+      // Circle validation
       if (type === 'circle') {
-        if (!center || !center.lat || !center.lng) {
+        if (!center || center.lat === undefined || center.lng === undefined) {
           console.log('❌ Validation failed: Center coordinates are required for circular zone');
           return res.status(400).json({
             error: 'Center coordinates are required for circular zone'
           });
         }
-        if (!radius || radius <= 0) {
+        
+        const centerLat = parseFloat(center.lat);
+        const centerLng = parseFloat(center.lng);
+        
+        if (isNaN(centerLat) || isNaN(centerLng)) {
+          console.log('❌ Validation failed: Invalid center coordinates');
+          return res.status(400).json({
+            error: 'Invalid center coordinates'
+          });
+        }
+        
+        if (!radius || isNaN(radius) || parseFloat(radius) <= 0) {
           console.log('❌ Validation failed: Valid radius is required');
           return res.status(400).json({
-            error: 'Valid radius is required'
+            error: 'Valid radius is required (must be greater than 0)'
           });
         }
       }
 
+      // Polygon validation
       if (type === 'polygon') {
         if (!coordinates || !Array.isArray(coordinates) || coordinates.length < 3) {
           console.log('❌ Validation failed: At least 3 coordinates are required for polygon');
           return res.status(400).json({
             error: 'At least 3 coordinates are required for polygon geofence'
           });
+        }
+
+        // Validate each coordinate
+        for (let i = 0; i < coordinates.length; i++) {
+          const coord = coordinates[i];
+          if (!coord || coord.lat === undefined || coord.lng === undefined) {
+            console.log(`❌ Validation failed: Invalid coordinate at index ${i}`);
+            return res.status(400).json({
+              error: `Invalid coordinate at position ${i + 1}`
+            });
+          }
+          
+          const coordLat = parseFloat(coord.lat);
+          const coordLng = parseFloat(coord.lng);
+          
+          if (isNaN(coordLat) || isNaN(coordLng)) {
+            console.log(`❌ Validation failed: Invalid coordinate values at index ${i}`);
+            return res.status(400).json({
+              error: `Invalid coordinate values at position ${i + 1}`
+            });
+          }
         }
       }
 
@@ -232,6 +275,13 @@ const geoController = {
       const { id } = req.params;
       const updateData = req.body;
 
+      // Validate ID
+      if (!id) {
+        return res.status(400).json({
+          error: 'Geofence ID is required'
+        });
+      }
+
       const updatedGeofence = await Geofence.findByIdAndUpdate(
         id, 
         updateData, 
@@ -261,6 +311,13 @@ const geoController = {
   deleteGeofence: async (req, res) => {
     try {
       const { id } = req.params;
+
+      // Validate ID
+      if (!id) {
+        return res.status(400).json({
+          error: 'Geofence ID is required'
+        });
+      }
 
       const deletedGeofence = await Geofence.findByIdAndUpdate(
         id,
@@ -341,7 +398,41 @@ const geoController = {
         details: error.message
       });
     }
+  },
+   initializeSampleGeofences: async () => {
+    try {
+      const Geofence = require('../models/Geofence');
+      const count = await Geofence.countDocuments();
+
+      if (count === 0) {
+        console.log('📝 Creating sample geofences...');
+
+        const sampleGeofences = [
+          {
+            name: 'Main Tourist Area',
+            type: 'circle',
+            center: { lat: 28.6139, lng: 77.2090 },
+            radius: 5000,
+            isActive: true
+          },
+          {
+            name: 'Safety Zone 1',
+            type: 'circle',
+            center: { lat: 21.1458, lng: 79.0881 },
+            radius: 3000,
+            isActive: true
+          }
+        ];
+
+        await Geofence.insertMany(sampleGeofences);
+        console.log('✅ Sample geofences created');
+      }
+    } catch (error) {
+      console.error('❌ Error creating sample geofences:', error);
+    }
   }
 };
+
+
 
 module.exports = geoController;
