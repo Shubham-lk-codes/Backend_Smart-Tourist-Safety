@@ -36,12 +36,16 @@ const geoRoutes = require("./routes/geoRoutes");
 const userRoutes = require("./routes/userRoutes");
 const emergencyRoutes = require("./routes/emergencyRoutes");
 const websocketRoutes = require("./routes/websocketRoutes");
+const safetyRoutes = require("./routes/safetyRoutes");
+const { initializeSampleSafeZones } = require('./controllers/safeZoneController');
+const { initializeSampleEmergencyContacts } = require('./controllers/emergencyContactController');
 
 // Use routes
 app.use("/api/geo", geoRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/emergencies", emergencyRoutes);
 app.use("/websocket", websocketRoutes);
+app.use("/api", safetyRoutes); 
 
 // Initialize WebSocket
 const {   initializeWebSocket,
@@ -51,6 +55,8 @@ initializeWebSocket(server);
 // Initialize sample data
 const { initializeSampleGeofences } = require('./controllers/geoController.js');
 initializeSampleGeofences();
+initializeSampleSafeZones();
+initializeSampleEmergencyContacts();
 
 // Root endpoint
 app.get('/', (req, res) => {
