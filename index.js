@@ -31,6 +31,7 @@ app.use(cors());
 app.use(morgan('combined'));
 app.use(express.json());
 
+
 // Import routes
 const geoRoutes = require("./routes/geoRoutes");
 const userRoutes = require("./routes/userRoutes");
