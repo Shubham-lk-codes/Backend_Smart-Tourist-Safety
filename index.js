@@ -91,6 +91,25 @@ app.use((error, req, res, next) => {
   });
 });
 
+// Error handler - FIXED with proper signature
+app.use((error, req, res, next) => {
+  console.error('Server error:', error);
+  
+  // Handle JSON parsing errors
+  if (error instanceof SyntaxError && error.status === 400 && 'body' in error) {
+    return res.status(400).json({ 
+      error: 'Invalid JSON in request body',
+      details: error.message 
+    });
+  }
+  
+  res.status(500).json({ 
+    error: 'Internal server error',
+    details: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+    stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+  });
+});
+
 // Start server
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);

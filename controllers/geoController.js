@@ -1,4 +1,5 @@
 const Geofence = require('../models/Geofence');
+const mongoose = require('mongoose'); // Add this import
 
 // Simple geofence check using Haversine formula
 const calculateDistance = (lat1, lon1, lat2, lon2) => {
@@ -84,7 +85,7 @@ const geoController = {
     }
   },
 
-  // Get all geofence boundaries - FIXED RESPONSE STRUCTURE
+  // Get all geofence boundaries
   getGeofences: async (req, res) => {
     try {
       console.log('📋 Fetching all geofences from database...');
@@ -102,29 +103,57 @@ const geoController = {
     }
   },
 
-  // Add a new geofence - FIXED VALIDATION AND ERROR HANDLING
+  // Get single geofence by ID
+  getGeofenceById: async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      if (!id) {
+        return res.status(400).json({
+          error: 'Geofence ID is required'
+        });
+      }
+
+      const geofence = await Geofence.findById(id);
+      
+      if (!geofence) {
+        return res.status(404).json({
+          error: 'Geofence not found'
+        });
+      }
+      
+      res.json(geofence);
+    } catch (error) {
+      console.error('Error getting geofence:', error);
+      res.status(500).json({
+        error: 'Internal server error',
+        details: error.message
+      });
+    }
+  },
+
+  // Add a new geofence - FIXED VERSION
   addGeofence: async (req, res) => {
     console.log('🆕 Received request to add new geofence');
     
     try {
       const { name, type, center, radius, coordinates } = req.body;
       
-      console.log('📨 Received geofence data:', { 
+      console.log('📨 Received geofence data:', JSON.stringify({
         name, 
         type, 
         center, 
         radius, 
         coordinatesCount: coordinates ? coordinates.length : 0 
-      });
+      }, null, 2));
       
-      // Enhanced validation
+      // Validate name
       if (!name || !name.trim()) {
         console.log('❌ Validation failed: Zone name is required');
         return res.status(400).json({
           error: 'Zone name is required'
         });
       }
-      
 
       // Validate type
       if (!type || !['circle', 'polygon'].includes(type)) {
@@ -134,9 +163,15 @@ const geoController = {
         });
       }
 
-      // Circle validation
+      let geofenceData = {
+        name: name.trim(),
+        type: type,
+        isActive: true
+      };
+
+      // Handle circle type
       if (type === 'circle') {
-        if (!center || center.lat === undefined || center.lng === undefined) {
+        if (!center || !center.lat || !center.lng) {
           console.log('❌ Validation failed: Center coordinates are required for circular zone');
           return res.status(400).json({
             error: 'Center coordinates are required for circular zone'
@@ -153,15 +188,24 @@ const geoController = {
           });
         }
         
-        if (!radius || isNaN(radius) || parseFloat(radius) <= 0) {
+        const radiusNum = parseFloat(radius);
+        if (!radius || isNaN(radiusNum) || radiusNum <= 0) {
           console.log('❌ Validation failed: Valid radius is required');
           return res.status(400).json({
             error: 'Valid radius is required (must be greater than 0)'
           });
         }
+        
+        geofenceData.center = {
+          lat: centerLat,
+          lng: centerLng
+        };
+        geofenceData.radius = radiusNum;
+        
+        console.log('🔵 Circle data prepared:', geofenceData.center, 'radius:', geofenceData.radius);
       }
 
-      // Polygon validation
+      // Handle polygon type
       if (type === 'polygon') {
         if (!coordinates || !Array.isArray(coordinates) || coordinates.length < 3) {
           console.log('❌ Validation failed: At least 3 coordinates are required for polygon');
@@ -170,7 +214,7 @@ const geoController = {
           });
         }
 
-        // Validate each coordinate
+        const validCoordinates = [];
         for (let i = 0; i < coordinates.length; i++) {
           const coord = coordinates[i];
           if (!coord || coord.lat === undefined || coord.lng === undefined) {
@@ -189,54 +233,45 @@ const geoController = {
               error: `Invalid coordinate values at position ${i + 1}`
             });
           }
+          
+          validCoordinates.push({
+            lat: coordLat,
+            lng: coordLng
+          });
         }
-      }
-
-      // Prepare geofence data
-      const geofenceData = {
-        name: name.trim(),
-        type: type,
-        isActive: true
-      };
-
-      // Add circle-specific data
-      if (type === 'circle') {
-        geofenceData.center = {
-          lat: parseFloat(center.lat),
-          lng: parseFloat(center.lng)
-        };
-        geofenceData.radius = parseFloat(radius);
-        console.log('🔵 Circle data prepared:', geofenceData.center, 'radius:', geofenceData.radius);
-      }
-
-      // Add polygon-specific data
-      if (type === 'polygon') {
-        geofenceData.coordinates = coordinates.map(coord => ({
-          lat: parseFloat(coord.lat),
-          lng: parseFloat(coord.lng)
-        }));
+        
+        geofenceData.coordinates = validCoordinates;
         console.log('🔷 Polygon data prepared with', geofenceData.coordinates.length, 'points');
       }
 
       console.log('💾 Attempting to save geofence to database...');
+      console.log('Geofence data to save:', JSON.stringify(geofenceData, null, 2));
       
       const newGeofence = new Geofence(geofenceData);
       const savedGeofence = await newGeofence.save();
 
       console.log('✅ Geofence saved successfully with ID:', savedGeofence._id);
+      console.log('Saved geofence:', JSON.stringify(savedGeofence.toObject(), null, 2));
       
-      res.status(201).json({
+      return res.status(201).json({
+        success: true,
         message: 'Geofence added successfully',
         geofence: savedGeofence
       });
     } catch (error) {
-      console.error('💥 ERROR adding geofence:', error);
+      console.error('💥 ERROR adding geofence:');
+      console.error('Error name:', error.name);
+      console.error('Error message:', error.message);
+      console.error('Error code:', error.code);
       console.error('Error stack:', error.stack);
       
-      // Handle MongoDB validation errors
-      if (error.name === 'ValidationError') {
+      // Handle Mongoose validation errors
+      if (error instanceof mongoose.Error.ValidationError) {
         console.log('❌ MongoDB Validation Error:', error.errors);
-        const errors = Object.values(error.errors).map(err => err.message);
+        const errors = {};
+        for (const field in error.errors) {
+          errors[field] = error.errors[field].message;
+        }
         return res.status(400).json({
           error: 'Validation failed',
           details: errors
@@ -246,8 +281,10 @@ const geoController = {
       // Handle duplicate key errors
       if (error.code === 11000) {
         console.log('❌ Duplicate key error');
+        const field = Object.keys(error.keyPattern)[0];
         return res.status(400).json({
-          error: 'Geofence with this name already exists'
+          error: 'Duplicate entry',
+          details: `A geofence with this ${field} already exists`
         });
       }
       
@@ -260,8 +297,17 @@ const geoController = {
         });
       }
       
+      // Handle invalid ObjectId errors
+      if (error.name === 'CastError') {
+        console.log('❌ Cast error:', error.message);
+        return res.status(400).json({
+          error: 'Invalid data format',
+          details: error.message
+        });
+      }
+      
       console.log('❌ Unknown error type:', error.name);
-      res.status(500).json({
+      return res.status(500).json({
         error: 'Internal server error',
         details: error.message,
         stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
@@ -282,18 +328,81 @@ const geoController = {
         });
       }
 
-      const updatedGeofence = await Geofence.findByIdAndUpdate(
-        id, 
-        updateData, 
-        { new: true, runValidators: true }
-      );
-
-      if (!updatedGeofence) {
+      // Find the existing geofence first
+      const existingGeofence = await Geofence.findById(id);
+      
+      if (!existingGeofence) {
         return res.status(404).json({
           error: 'Geofence not found'
         });
       }
-      
+
+      // Don't allow changing type (complex validation needed)
+      if (updateData.type && updateData.type !== existingGeofence.type) {
+        return res.status(400).json({
+          error: 'Cannot change geofence type. Please delete and create a new one.'
+        });
+      }
+
+      // Validate based on type
+      if (existingGeofence.type === 'circle') {
+        if (updateData.center) {
+          if (updateData.center.lat !== undefined) {
+            const lat = parseFloat(updateData.center.lat);
+            if (isNaN(lat)) {
+              return res.status(400).json({
+                error: 'Invalid latitude'
+              });
+            }
+          }
+          if (updateData.center.lng !== undefined) {
+            const lng = parseFloat(updateData.center.lng);
+            if (isNaN(lng)) {
+              return res.status(400).json({
+                error: 'Invalid longitude'
+              });
+            }
+          }
+        }
+        
+        if (updateData.radius !== undefined) {
+          const radius = parseFloat(updateData.radius);
+          if (isNaN(radius) || radius <= 0) {
+            return res.status(400).json({
+              error: 'Radius must be a positive number'
+            });
+          }
+        }
+      }
+
+      if (existingGeofence.type === 'polygon' && updateData.coordinates) {
+        if (!Array.isArray(updateData.coordinates) || updateData.coordinates.length < 3) {
+          return res.status(400).json({
+            error: 'At least 3 coordinates are required for polygon'
+          });
+        }
+        
+        for (let coord of updateData.coordinates) {
+          if (!coord.lat || !coord.lng || isNaN(coord.lat) || isNaN(coord.lng)) {
+            return res.status(400).json({
+              error: 'Invalid coordinates in polygon'
+            });
+          }
+        }
+      }
+
+      // Merge existing data with updates
+      const finalUpdateData = {
+        ...updateData,
+        updatedAt: Date.now()
+      };
+
+      const updatedGeofence = await Geofence.findByIdAndUpdate(
+        id, 
+        finalUpdateData, 
+        { new: true, runValidators: true }
+      );
+
       res.json({
         message: 'Geofence updated successfully',
         geofence: updatedGeofence
@@ -399,9 +508,10 @@ const geoController = {
       });
     }
   },
-   initializeSampleGeofences: async () => {
+
+  // Initialize sample geofences
+  initializeSampleGeofences: async () => {
     try {
-      const Geofence = require('../models/Geofence');
       const count = await Geofence.countDocuments();
 
       if (count === 0) {
@@ -421,6 +531,17 @@ const geoController = {
             center: { lat: 21.1458, lng: 79.0881 },
             radius: 3000,
             isActive: true
+          },
+          {
+            name: 'Polygon Zone Example',
+            type: 'polygon',
+            coordinates: [
+              { lat: 28.6139, lng: 77.2090 },
+              { lat: 28.6239, lng: 77.2190 },
+              { lat: 28.6039, lng: 77.2290 },
+              { lat: 28.5939, lng: 77.2090 }
+            ],
+            isActive: true
           }
         ];
 
@@ -432,7 +553,5 @@ const geoController = {
     }
   }
 };
-
-
 
 module.exports = geoController;

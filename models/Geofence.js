@@ -14,13 +14,17 @@ const coordinateSchema = new mongoose.Schema({
 const geofenceSchema = new mongoose.Schema({
   name: {
     type: String,
-    required: true,
-    trim: true
+    required: [true, 'Zone name is required'],
+    trim: true,
+    unique: true
   },
   type: {
     type: String,
-    required: true,
-    enum: ['circle', 'polygon'],
+    required: [true, 'Zone type is required'],
+    enum: {
+      values: ['circle', 'polygon'],
+      message: 'Zone type must be either "circle" or "polygon"'
+    },
     default: 'circle'
   },
   center: {
@@ -37,7 +41,10 @@ const geofenceSchema = new mongoose.Schema({
     type: Number, // in meters
     required: function() { return this.type === 'circle'; }
   },
-  coordinates: [coordinateSchema], // For polygon type
+  coordinates: {
+    type: [coordinateSchema], // For polygon type
+    required: function() { return this.type === 'polygon'; }
+  },
   isActive: {
     type: Boolean,
     default: true
@@ -52,10 +59,9 @@ const geofenceSchema = new mongoose.Schema({
   }
 });
 
-// Update the updatedAt field before saving
-geofenceSchema.pre('save', function(next) {
+// Update the updatedAt field before saving - SIMPLIFIED VERSION
+geofenceSchema.pre('save', function() {
   this.updatedAt = Date.now();
-  next();
 });
 
 module.exports = mongoose.model('Geofence', geofenceSchema);
