@@ -26,6 +26,7 @@ const geoController = {
         });
       }
 
+      
       const latitude = parseFloat(lat);
       const longitude = parseFloat(lng);
 
