@@ -101,14 +101,14 @@ const initializeSampleEmergencyContacts = async () => {
           description: "Disaster management helpline",
           priority: 3
         },
-        {
-          name: "US Embassy Helpline",
-          phone: "011-2419-8000",
-          type: "embassy",
-          countryCode: "+91",
-          description: "Emergency assistance for US citizens",
-          priority: 3
-        }
+        // {
+        //   name: "US Embassy Helpline",
+        //   phone: "011-2419-8000",
+        //   type: "embassy",
+        //   countryCode: "+91",
+        //   description: "Emergency assistance for US citizens",
+        //   priority: 3
+        // }
       ];
 
       await EmergencyContact.insertMany(sampleContacts);

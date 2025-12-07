@@ -15,6 +15,11 @@ import os
 import sys
 from pymongo import MongoClient
 from bson import ObjectId
+import pygame
+import threading
+from gtts import gTTS
+import tempfile
+import sqlite3
 
 warnings.filterwarnings('ignore')
 
@@ -38,18 +43,127 @@ class TouristAnomalyDetector:
         # Movement tracking
         self.tourist_states = {}  # Track each tourist's state
         
+        # Voice alert system
+        self.voice_alerts_enabled = True
+        self.last_voice_alert = {}  # Track last voice alert time per tourist
+        pygame.mixer.init()  # Initialize pygame for audio
+        
+        # In-memory voice alerts storage (SQLite for persistence)
+        self.voice_alerts_db = "voice_alerts.db"
+        self._init_voice_alerts_db()
+        
+        # Hindi voice messages
+        self.hindi_messages = {
+            'unsafe_zone': "चेतावनी! आप असुरक्षित क्षेत्र में प्रवेश कर गए हैं। कृपया अपनी सुरक्षा के लिए तुरंत बाहर निकलें।",
+            'restricted_zone': "सतर्क! यह प्रतिबंधित क्षेत्र है। सुरक्षा कारणों से प्रवेश वर्जित है।",
+            'high_speed': "खतरा! बहुत तेज गति का पता चला है। कृपया अपनी सुरक्षा के लिए गति कम करें।",
+            'stationary': "सावधान! आप बहुत देर से एक ही जगह पर हैं। क्या सब ठीक है?",
+            'phone_off': "सूचना! आपका फोन सिग्नल नहीं मिल रहा है। कृपया अपनी स्थिति की जानकारी दें।",
+            'test_alert': "यह एक टेस्ट अलर्ट है। आपकी सुरक्षा प्रणाली ठीक से काम कर रही है।"
+        }
+        
         # Configuration
         self.config = {
             'stationary_threshold': 300,  # 5 minutes
             'suspicious_speed': 15.0,     # m/s
             'max_walking_speed': 5.0,     # m/s
             'phone_off_threshold': 300,   # 5 minutes
-            'geofence_buffer': 50         # meters
+            'geofence_buffer': 50,        # meters
+            'voice_alert_cooldown': 300,  # 5 minutes cooldown between voice alerts
+            'default_language': 'hi'      # Hindi language code
         }
         
         # Load or train model
         self._initialize_model()
         print(f"🤖 TouristAnomalyDetector initialized. Node API: {node_api_url}")
+        print(f"🔊 Hindi Voice Alerts: Enabled")
+    
+    def _init_voice_alerts_db(self):
+        """Initialize SQLite database for voice alerts storage"""
+        try:
+            conn = sqlite3.connect(self.voice_alerts_db)
+            cursor = conn.cursor()
+            
+            # Create voice_alerts table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS voice_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tourist_id TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT DEFAULT 'sent'
+                )
+            ''')
+            
+            # Create index for faster queries
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_tourist_id 
+                ON voice_alerts(tourist_id)
+            ''')
+            
+            conn.commit()
+            conn.close()
+            print("✅ Voice alerts database initialized")
+        except Exception as e:
+            print(f"❌ Voice alerts database initialization failed: {e}")
+    
+    def _save_voice_alert_local(self, tourist_id, message, alert_type='voice'):
+        """Save voice alert to local SQLite database"""
+        try:
+            conn = sqlite3.connect(self.voice_alerts_db)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO voice_alerts (tourist_id, message, alert_type, timestamp, status)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (tourist_id, message, alert_type, datetime.now(), 'sent'))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error saving voice alert locally: {e}")
+            return False
+    
+    def _get_voice_alerts_local(self, tourist_id=None, limit=20):
+        """Get voice alerts from local database"""
+        try:
+            conn = sqlite3.connect(self.voice_alerts_db)
+            cursor = conn.cursor()
+            
+            if tourist_id:
+                cursor.execute('''
+                    SELECT id, tourist_id, message, alert_type, timestamp, status
+                    FROM voice_alerts
+                    WHERE tourist_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                ''', (tourist_id, limit))
+            else:
+                cursor.execute('''
+                    SELECT id, tourist_id, message, alert_type, timestamp, status
+                    FROM voice_alerts
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                ''', (limit,))
+            
+            alerts = []
+            for row in cursor.fetchall():
+                alerts.append({
+                    'id': row[0],
+                    'tourist_id': row[1],
+                    'message': row[2],
+                    'alert_type': row[3],
+                    'timestamp': row[4],
+                    'status': row[5]
+                })
+            
+            conn.close()
+            return alerts
+        except Exception as e:
+            print(f"Error getting voice alerts locally: {e}")
+            return []
     
     def _connect_to_mongodb(self):
         """Connect to MongoDB database"""
@@ -91,7 +205,6 @@ class TouristAnomalyDetector:
                 return []
             
             geofences = list(self.db.geofences.find({"is_active": True}))
-            print(f"📌 Loaded {len(geofences)} active geofences from database")
             return geofences
         except Exception as e:
             print(f"Error fetching geofences: {e}")
@@ -218,8 +331,6 @@ class TouristAnomalyDetector:
     
     def _generate_training_data(self, n_samples=1000):
         """Generate synthetic training data"""
-        print("📊 Generating training data...")
-        
         data = []
         
         # Normal patterns (80%)
@@ -321,6 +432,116 @@ class TouristAnomalyDetector:
             print(f"Geofence check error: {e}")
             return None
     
+    def _send_voice_alert(self, tourist_id, alert_type, zone_name=None, speed=None):
+        """Send Hindi voice alert to tourist"""
+        try:
+            # Check cooldown
+            current_time = time.time()
+            if tourist_id in self.last_voice_alert:
+                last_alert_time = self.last_voice_alert[tourist_id]
+                if current_time - last_alert_time < self.config['voice_alert_cooldown']:
+                    print(f"⏰ Voice alert on cooldown for {tourist_id}")
+                    return False
+            
+            # Get tourist info
+            tourist_info = self._get_tourist_info(tourist_id)
+            tourist_name = tourist_info.get('name', 'यात्री') if tourist_info else 'यात्री'
+            
+            # Prepare Hindi message based on alert type
+            if alert_type == 'unsafe_zone':
+                base_message = self.hindi_messages['unsafe_zone']
+                if zone_name:
+                    message = f"{tourist_name} जी। {zone_name} क्षेत्र में। {base_message}"
+                else:
+                    message = f"{tourist_name} जी। {base_message}"
+                    
+            elif alert_type == 'restricted_zone':
+                base_message = self.hindi_messages['restricted_zone']
+                if zone_name:
+                    message = f"{tourist_name} जी। {zone_name} क्षेत्र में। {base_message}"
+                else:
+                    message = f"{tourist_name} जी। {base_message}"
+                    
+            elif alert_type == 'high_speed':
+                base_message = self.hindi_messages['high_speed']
+                if speed:
+                    message = f"{tourist_name} जी। {speed:.1f} मीटर प्रति सेकंड की गति। {base_message}"
+                else:
+                    message = f"{tourist_name} जी। {base_message}"
+                    
+            elif alert_type == 'stationary':
+                message = f"{tourist_name} जी। {self.hindi_messages['stationary']}"
+                
+            elif alert_type == 'phone_off':
+                message = f"{tourist_name} जी। {self.hindi_messages['phone_off']}"
+                
+            elif alert_type == 'test':
+                message = f"{tourist_name} जी। {self.hindi_messages['test_alert']}"
+                
+            else:
+                message = f"{tourist_name} जी। सुरक्षा चेतावनी। कृपया सतर्क रहें।"
+            
+            print(f"🔊 Hindi voice alert for {tourist_name}: {message}")
+            
+            # Generate and play voice alert in a separate thread
+            def play_hindi_voice_alert():
+                try:
+                    # Create temporary audio file
+                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+                    temp_path = temp_file.name
+                    temp_file.close()
+                    
+                    # Convert Hindi text to speech
+                    tts = gTTS(text=message, lang=self.config['default_language'], slow=False)
+                    tts.save(temp_path)
+                    
+                    # Play the audio
+                    pygame.mixer.music.load(temp_path)
+                    pygame.mixer.music.play()
+                    
+                    # Wait for playback to finish
+                    while pygame.mixer.music.get_busy():
+                        time.sleep(0.1)
+                    
+                    # Cleanup
+                    pygame.mixer.music.unload()
+                    os.unlink(temp_path)
+                    
+                    print(f"✅ Hindi voice alert played for {tourist_name}")
+                    
+                except Exception as e:
+                    print(f"Hindi voice alert error: {e}")
+                    # Fallback to English if Hindi fails
+                    try:
+                        fallback_msg = "Warning! Safety alert. Please be cautious."
+                        tts = gTTS(text=fallback_msg, lang='en', slow=False)
+                        tts.save(temp_path)
+                        pygame.mixer.music.load(temp_path)
+                        pygame.mixer.music.play()
+                        while pygame.mixer.music.get_busy():
+                            time.sleep(0.1)
+                        pygame.mixer.music.unload()
+                        os.unlink(temp_path)
+                    except:
+                        pass
+            
+            # Start voice alert in background thread
+            voice_thread = threading.Thread(target=play_hindi_voice_alert)
+            voice_thread.daemon = True
+            voice_thread.start()
+            
+            # Update last alert time
+            self.last_voice_alert[tourist_id] = current_time
+            
+            # Save alert to local database
+            self._save_voice_alert_local(tourist_id, message, alert_type)
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error sending Hindi voice alert: {e}")
+            return False
+    
     def process_location_update(self, tourist_id, lat, lng, timestamp=None, speed=None):
         """
         Process new location update for a tourist
@@ -376,6 +597,7 @@ class TouristAnomalyDetector:
         alerts = []
         anomaly_score = 0
         is_anomalous = False
+        voice_alerts_sent = []
         
         # 1. Check stationary status
         if distance_moved < 5:  # Stationary (less than 5 meters)
@@ -383,7 +605,14 @@ class TouristAnomalyDetector:
             if stationary_duration > self.config['stationary_threshold']:
                 if 'stationary' not in state['alerts_sent']:
                     state['alerts_sent'].append('stationary')
-                    alerts.append(f"🚨 Stationary for {int(stationary_duration)}s")
+                    alert_msg = f"🚨 Stationary for {int(stationary_duration)}s"
+                    alerts.append(alert_msg)
+                    
+                    # Send Hindi voice alert for stationary
+                    if self.voice_alerts_enabled:
+                        voice_sent = self._send_voice_alert(tourist_id, 'stationary')
+                        if voice_sent:
+                            voice_alerts_sent.append(self.hindi_messages['stationary'])
         else:
             state['stationary_start'] = timestamp
         
@@ -392,7 +621,14 @@ class TouristAnomalyDetector:
             if 'phone_off' not in state['alerts_sent']:
                 state['alerts_sent'].append('phone_off')
                 state['phone_status'] = 'offline'
-                alerts.append(f"📴 No signal for {int(time_diff)}s")
+                alert_msg = f"📴 No signal for {int(time_diff)}s"
+                alerts.append(alert_msg)
+                
+                # Send Hindi voice alert for phone off
+                if self.voice_alerts_enabled:
+                    voice_sent = self._send_voice_alert(tourist_id, 'phone_off')
+                    if voice_sent:
+                        voice_alerts_sent.append(self.hindi_messages['phone_off'])
         else:
             state['phone_status'] = 'online'
         
@@ -400,7 +636,20 @@ class TouristAnomalyDetector:
         violating_geofence = self._check_geofence_violation(lat, lng)
         if violating_geofence:
             zone_name = violating_geofence.get('name', 'Restricted Area')
-            alerts.append(f"🚫 ENTERED RESTRICTED ZONE: {zone_name}")
+            zone_type = violating_geofence.get('zone_type', 'restricted')
+            
+            alert_msg = f"🚫 ENTERED RESTRICTED ZONE: {zone_name}"
+            alerts.append(alert_msg)
+            
+            # Send Hindi voice alert for geofence violation
+            if self.voice_alerts_enabled:
+                if zone_type == 'unsafe':
+                    voice_sent = self._send_voice_alert(tourist_id, 'unsafe_zone', zone_name)
+                else:
+                    voice_sent = self._send_voice_alert(tourist_id, 'restricted_zone', zone_name)
+                
+                if voice_sent:
+                    voice_alerts_sent.append(self.hindi_messages['unsafe_zone' if zone_type == 'unsafe' else 'restricted_zone'])
         
         # 4. ML anomaly detection
         if len(state['movement_history']) >= 5 and self.is_trained:
@@ -413,11 +662,20 @@ class TouristAnomalyDetector:
                 if mean_speed > self.config['suspicious_speed']:
                     is_anomalous = True
                     anomaly_score = 0.8
-                    alerts.append(f"🚗 SUSPICIOUS SPEED: {mean_speed:.1f} m/s")
+                    alert_msg = f"🚗 SUSPICIOUS SPEED: {mean_speed:.1f} m/s"
+                    alerts.append(alert_msg)
+                    
+                    # Send Hindi voice alert for high speed
+                    if self.voice_alerts_enabled:
+                        voice_sent = self._send_voice_alert(tourist_id, 'high_speed', speed=mean_speed)
+                        if voice_sent:
+                            voice_alerts_sent.append(self.hindi_messages['high_speed'])
+                            
                 elif mean_speed < 0.1 and len(state['movement_history']) > 10:
                     is_anomalous = True
                     anomaly_score = 0.6
-                    alerts.append("⚠️ ABNORMAL STATIONARY PATTERN")
+                    alert_msg = "⚠️ ABNORMAL STATIONARY PATTERN"
+                    alerts.append(alert_msg)
                     
             except Exception as e:
                 print(f"ML detection error: {e}")
@@ -437,6 +695,7 @@ class TouristAnomalyDetector:
             'anomaly_score': float(anomaly_score),
             'is_anomalous': is_anomalous,
             'alerts': alerts,
+            'voice_alerts': voice_alerts_sent,
             'timestamp': datetime.fromtimestamp(timestamp),
             'processed_at': datetime.now(),
             'phone_status': state['phone_status'],
@@ -456,6 +715,7 @@ class TouristAnomalyDetector:
             'anomaly_score': float(anomaly_score),
             'is_anomalous': is_anomalous,
             'alerts': alerts,
+            'voice_alerts': voice_alerts_sent,
             'location': {'lat': lat, 'lng': lng},
             'timestamp': datetime.fromtimestamp(timestamp).isoformat(),
             'activity_saved': activity_saved,
@@ -493,6 +753,14 @@ class TouristAnomalyDetector:
             except Exception as e:
                 print(f"Alert sending error: {e}")
     
+    def send_test_voice_alert(self, tourist_id="test_tourist"):
+        """Send a test Hindi voice alert"""
+        try:
+            return self._send_voice_alert(tourist_id, 'test')
+        except Exception as e:
+            print(f"Test voice alert error: {e}")
+            return False
+    
     def get_all_live_users(self):
         """Get all live users from database"""
         try:
@@ -529,6 +797,22 @@ class TouristAnomalyDetector:
             print(f"Error fetching activities: {e}")
             return []
     
+    def get_voice_alert_history(self, tourist_id=None, limit=20):
+        """Get voice alert history from local database"""
+        try:
+            alerts = self._get_voice_alerts_local(tourist_id, limit)
+            return alerts
+        except Exception as e:
+            print(f"Error fetching voice alerts: {e}")
+            return []
+    
+    def toggle_voice_alerts(self, enabled=True):
+        """Toggle voice alerts on/off"""
+        self.voice_alerts_enabled = enabled
+        status = "सक्षम" if enabled else "अक्षम"
+        print(f"🔊 Hindi voice alerts {status}")
+        return self.voice_alerts_enabled
+    
     def get_system_status(self):
         """Get system status"""
         return {
@@ -537,7 +821,9 @@ class TouristAnomalyDetector:
             'config': self.config,
             'model_ready': self.model is not None,
             'database_connected': self.db is not None,
+            'voice_alerts_enabled': self.voice_alerts_enabled,
             'live_users_count': len(self.get_all_live_users()),
+            'hindi_voice_alerts': True,
             'timestamp': datetime.now().isoformat()
         }
 
@@ -560,6 +846,7 @@ CORS(app, resources={
 try:
     detector = TouristAnomalyDetector()
     print("✅ ML Detector initialized successfully with MongoDB")
+    print("🔊 Hindi Voice alert system ready")
 except Exception as e:
     print(f"❌ Failed to initialize ML Detector: {e}")
     detector = None
@@ -569,9 +856,11 @@ def health():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy' if detector else 'unhealthy',
-        'service': 'ML Anomaly Detection',
+        'service': 'ML Anomaly Detection with Hindi Voice Alerts',
         'model_ready': detector.is_trained if detector else False,
         'database_connected': detector.db is not None if detector else False,
+        'voice_alerts': detector.voice_alerts_enabled if detector else False,
+        'hindi_voice': True,
         'timestamp': datetime.now().isoformat()
     })
 
@@ -632,6 +921,87 @@ def detect():
             'success': False
         }), 500
 
+@app.route('/voice-alert/test', methods=['POST'])
+def test_voice_alert():
+    """Test Hindi voice alert system"""
+    try:
+        if not detector:
+            return jsonify({'error': 'ML detector not available'}), 503
+        
+        data = request.get_json()
+        tourist_id = data.get('tourist_id', 'test_tourist')
+        
+        success = detector.send_test_voice_alert(tourist_id)
+        
+        return jsonify({
+            'success': success,
+            'message': 'Hindi voice alert sent successfully' if success else 'Voice alert failed',
+            'hindi_message': detector.hindi_messages['test_alert'] if detector else ''
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/voice-alert/toggle', methods=['POST'])
+def toggle_voice_alerts():
+    """Toggle voice alerts on/off"""
+    try:
+        if not detector:
+            return jsonify({'error': 'ML detector not available'}), 503
+        
+        data = request.get_json()
+        enabled = data.get('enabled', True)
+        
+        new_status = detector.toggle_voice_alerts(enabled)
+        
+        return jsonify({
+            'success': True,
+            'voice_alerts_enabled': new_status,
+            'message': f'Voice alerts {"enabled" if new_status else "disabled"}',
+            'hindi_message': f"आवाज़ चेतावनी {'सक्षम' if new_status else 'अक्षम'}"
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/voice-alert/history', methods=['GET'])
+def get_voice_alert_history():
+    """Get voice alert history"""
+    try:
+        if not detector:
+            return jsonify({'error': 'ML detector not available'}), 503
+        
+        tourist_id = request.args.get('tourist_id')
+        limit = request.args.get('limit', 20, type=int)
+        
+        alerts = detector.get_voice_alert_history(tourist_id, limit)
+        
+        return jsonify({
+            'success': True,
+            'count': len(alerts),
+            'hindi_alerts': True,
+            'alerts': alerts
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/voice-alert/messages', methods=['GET'])
+def get_hindi_messages():
+    """Get all Hindi alert messages"""
+    try:
+        if not detector:
+            return jsonify({'error': 'ML detector not available'}), 503
+        
+        return jsonify({
+            'success': True,
+            'messages': detector.hindi_messages,
+            'language': 'hindi'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/live-users', methods=['GET'])
 def get_live_users():
     """Get all live users from database"""
@@ -669,7 +1039,7 @@ def get_activities(tourist_id):
 
 @app.route('/simulate', methods=['POST'])
 def simulate():
-    """Simulate anomaly for testing"""
+    """Simulate anomaly for testing with Hindi voice alert"""
     try:
         data = request.get_json()
         tourist_id = data.get('tourist_id', 'test_tourist')
@@ -680,12 +1050,14 @@ def simulate():
             'anomaly_score': 0.9,
             'is_anomalous': True,
             'alerts': ['🚨 SIMULATED ANOMALY: High speed detected (25 m/s)'],
+            'voice_alerts': ['खतरा! बहुत तेज गति का पता चला है। कृपया अपनी सुरक्षा के लिए गति कम करें।'],
             'location': {'lat': 28.6139, 'lng': 77.2090},
             'timestamp': datetime.now().isoformat(),
             'phone_status': 'online',
             'speed': 25.0,
             'activity_saved': False,
-            'database_connected': detector.db is not None if detector else False
+            'database_connected': detector.db is not None if detector else False,
+            'hindi_alert': True
         }
         
         # Send alert to backend
@@ -695,10 +1067,14 @@ def simulate():
                 ['🚨 SIMULATED ANOMALY: High speed detected (25 m/s)'],
                 28.6139, 77.2090
             )
+            
+            # Send Hindi test voice alert
+            detector.send_test_voice_alert(tourist_id)
         
         return jsonify({
             'success': True,
-            'message': 'Anomaly simulated',
+            'message': 'Anomaly simulated with Hindi voice alert',
+            'hindi_message': 'असामान्य गतिविधि सिम्युलेट की गई',
             'result': result
         })
         
@@ -708,11 +1084,13 @@ def simulate():
 if __name__ == '__main__':
     port = int(os.environ.get('ML_PORT', 5001))
     print(f"\n{'='*50}")
-    print(f"🚀 ML Anomaly Detection API")
+    print(f"🚀 ML Anomaly Detection API with Hindi Voice Alerts")
     print(f"📡 Port: {port}")
+    print(f"🔊 Hindi Voice Alerts: सक्षम (Enabled)")
     print(f"🌐 Frontend URL: http://localhost:5173")
     print(f"🔗 Backend API: http://localhost:3000/api")
-    print(f"🗄️  MongoDB: mongodb://localhost:27017/tourist_safety")
+    print(f"🗄️  MongoDB: {detector.mongo_uri if detector else 'Not connected'}")
+    print(f"💾 Local Voice Alerts DB: voice_alerts.db")
     print(f"{'='*50}\n")
     
     app.run(host='0.0.0.0', port=port, debug=False)
