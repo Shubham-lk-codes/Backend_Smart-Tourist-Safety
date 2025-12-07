@@ -6,13 +6,16 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start:ml": "cd ml_model && python anomaly_detector.py",
+    "dev:all": "concurrently \"npm run dev\" \"npm run start:ml\""
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "axios": "^1.13.2",
     "body-parser": "^2.2.1",
     "cors": "^2.8.5",
     "crypto-js": "^4.2.0",

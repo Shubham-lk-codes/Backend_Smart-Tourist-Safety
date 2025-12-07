@@ -120,6 +120,138 @@ const initializeSampleEmergencyContacts = async () => {
     console.error('❌ Error creating sample emergency contacts:', error);
   }
 };
+// ===== NEW ML ALERT HANDLER =====
+const handleMLAlert = async (req, res) => {
+    try {
+        const { tourist_id, message, location, severity, type } = req.body;
+
+        if (!tourist_id || !message) {
+            return res.status(400).json({ 
+                error: 'Tourist ID and message are required' 
+            });
+        }
+
+        const alertId = `ml_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        
+        const emergencyAlert = {
+            id: alertId,
+            clientId: tourist_id,
+            type: 'ml_anomaly',
+            location: location || null,
+            timestamp: new Date().toISOString(),
+            status: 'active',
+            acknowledged: false,
+            data: {
+                message: message,
+                severity: severity || 'HIGH',
+                anomaly_type: type || 'ANOMALY_DETECTED',
+                source: 'ML_MODEL'
+            }
+        };
+
+        // Store in memory
+        const emergencyAlertsMap = getEmergencyAlertsMap();
+        emergencyAlertsMap.set(alertId, emergencyAlert);
+        
+        // Broadcast to police
+        broadcastToPolice({
+            type: 'emergency_alert',
+            alert: emergencyAlert,
+            timestamp: new Date().toISOString()
+        });
+
+        console.log(`🤖 ML ALERT: ${tourist_id} - ${message}`);
+
+        res.status(201).json({
+            success: true,
+            alertId: alertId,
+            message: 'ML alert processed and emergency services notified',
+            timestamp: emergencyAlert.timestamp
+        });
+
+    } catch (error) {
+        console.error('Error handling ML alert:', error);
+        res.status(500).json({ 
+            error: 'Internal server error',
+            details: error.message 
+        });
+    }
+};
+
+// ===== BATCH PROCESS TOURIST LOCATIONS =====
+const processTouristLocations = async (req, res) => {
+    try {
+        const { locations } = req.body;
+        
+        if (!Array.isArray(locations)) {
+            return res.status(400).json({ 
+                error: 'Locations must be an array' 
+            });
+        }
+
+        const mlController = require('./mlController');
+        const results = [];
+
+        for (const location of locations) {
+            const { tourist_id, latitude, longitude, timestamp } = location;
+            
+            if (!tourist_id || !latitude || !longitude) {
+                continue;
+            }
+
+            const mlResult = await mlController.processLocation(tourist_id, {
+                latitude: parseFloat(latitude),
+                longitude: parseFloat(longitude),
+                timestamp: timestamp || Date.now() / 1000
+            });
+
+            results.push(mlResult);
+
+            // If anomaly detected, trigger emergency
+            if (mlResult.is_anomalous && mlResult.alerts && mlResult.alerts.length > 0) {
+                await handleMLAlert({
+                    body: {
+                        tourist_id: tourist_id,
+                        message: mlResult.alerts.join('; '),
+                        location: { latitude, longitude },
+                        severity: 'HIGH',
+                        type: 'ANOMALY_DETECTED'
+                    }
+                }, {
+                    status: () => ({ json: () => {} }),
+                    json: () => {}
+                });
+            }
+        }
+
+        res.json({
+            success: true,
+            processed: results.length,
+            results: results
+        });
+
+    } catch (error) {
+        console.error('Error processing tourist locations:', error);
+        res.status(500).json({ 
+            error: 'Internal server error',
+            details: error.message 
+        });
+    }
+};
+
+// ===== GET ML SYSTEM STATUS =====
+const getMLSystemStatus = async (req, res) => {
+    try {
+        const mlController = require('./mlController');
+        const status = await mlController.getMLStatus();
+        res.json(status);
+    } catch (error) {
+        res.status(500).json({ 
+            error: 'Failed to get ML status',
+            details: error.message 
+        });
+    }
+};
 
 module.exports = {
   getEmergencyContacts,

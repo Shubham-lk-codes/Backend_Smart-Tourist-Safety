@@ -1,24 +1,61 @@
+// models/Tourist.js - मौजूदा models में add करें
 const mongoose = require('mongoose');
 
-const activitySchema = new mongoose.Schema({
-  userId: { 
-    type: String, 
-    required: true 
+const touristSchema = new mongoose.Schema({
+  tourist_id: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true
   },
-  activityType: { 
-    type: String, 
-    required: true 
+  name: {
+    type: String,
+    required: true,
+    trim: true
   },
-  details: mongoose.Schema.Types.Mixed,
-  blockId: String,
-  blockHash: String,
-  timestamp: { 
-    type: Date, 
-    default: Date.now 
+  phone: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  nationality: {
+    type: String,
+    trim: true
+  },
+  emergency_contacts: [{
+    name: String,
+    phone: String,
+    relation: String
+  }],
+  current_location: {
+    latitude: Number,
+    longitude: Number,
+    timestamp: Date,
+    speed: Number
+  },
+  last_seen: {
+    type: Date,
+    default: Date.now
+  },
+  status: {
+    type: String,
+    enum: ['ACTIVE', 'INACTIVE', 'MISSING', 'SAFE', 'DANGER'],
+    default: 'ACTIVE'
+  },
+  alerts_received: [{
+    type: String,
+    message: String,
+    severity: String,
+    timestamp: Date
+  }],
+  created_at: {
+    type: Date,
+    default: Date.now
+  },
+  updated_at: {
+    type: Date,
+    default: Date.now
   }
 });
 
-// Index for faster queries
-activitySchema.index({ userId: 1, timestamp: -1 });
-
-module.exports = mongoose.model('Activity', activitySchema);
+module.exports = mongoose.model('Tourist', touristSchema);
