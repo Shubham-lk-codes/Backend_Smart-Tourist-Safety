@@ -7,25 +7,46 @@ const emergencyAlerts = new Map();
 function initializeWebSocket(server) {
   const wss = new WebSocket.Server({ 
     server,
-    perMessageDeflate: false
+    perMessageDeflate: false,
+    clientTracking: true,
+    handleProtocols: (protocols) => {
+      return protocols.includes('chat') ? 'chat' : false;
+    }
   });
 
   wss.on('connection', (ws, req) => {
-    const clientId = generateClientId();
-    console.log(`🔗 New WebSocket connection: ${clientId}`);
+    // Extract origin from request headers
+    const origin = req.headers.origin;
+    const allowedOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
     
+    // Check origin (optional, for production)
+    if (origin && !allowedOrigins.includes(origin)) {
+      console.log(`🚫 Rejected connection from unauthorized origin: ${origin}`);
+      ws.close(1008, 'Unauthorized origin');
+      return;
+    }
+    
+    const clientId = generateClientId();
+    const clientIp = req.socket.remoteAddress;
+    
+    console.log(`🔗 New WebSocket connection: ${clientId} from ${origin || 'unknown origin'}`);
+    
+    // Set up connection
     connectedClients.set(ws, {
       id: clientId,
       connectedAt: new Date(),
       location: null,
-      userType: 'tourist'
+      userType: 'tourist',
+      origin: origin,
+      ip: clientIp
     });
 
-    // Send welcome message
+    // Send welcome message with frontend URL
     sendToClient(ws, {
       type: 'connection_established',
       clientId: clientId,
       message: 'WebSocket connected successfully',
+      frontend_url: 'http://localhost:5173',
       timestamp: new Date().toISOString()
     });
 
