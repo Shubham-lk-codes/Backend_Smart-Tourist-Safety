@@ -850,6 +850,54 @@ def detect():
             'success': False
         }), 500
 
+@app.route('/check-zone', methods=['POST'])
+def check_zone():
+    """Check if location is in safe/unsafe zone"""
+    try:
+        data = request.get_json()
+        lat = data.get('latitude')
+        lng = data.get('longitude')
+        tourist_id = data.get('tourist_id')
+        
+        if not lat or not lng:
+            return jsonify({'error': 'Latitude and longitude required'}), 400
+        
+        # Check geofence violation
+        violating_geofence = detector._check_geofence_violation(float(lat), float(lng))
+        
+        if violating_geofence:
+            zone_type = violating_geofence.get('zone_type', 'restricted')
+            zone_name = violating_geofence.get('name', 'Restricted Area')
+            
+            # Trigger voice alert if in unsafe/restricted zone
+            if zone_type in ['unsafe', 'restricted']:
+                alert_type = 'unsafe_zone' if zone_type == 'unsafe' else 'restricted_zone'
+                if detector.voice_alerts_enabled:
+                    detector._play_audio_file(alert_type)
+            
+            return jsonify({
+                'success': True,
+                'zone_type': zone_type,
+                'zone_name': zone_name,
+                'is_safe': False,
+                'message': f'You are in {zone_name} ({zone_type} zone)',
+                'hindi_message': 'चेतावनी! आप असुरक्षित क्षेत्र में हैं।' if zone_type == 'unsafe' else 'सतर्क! यह प्रतिबंधित क्षेत्र है।',
+                'recommendation': 'Please exit immediately for your safety.' if zone_type == 'unsafe' else 'Entry prohibited for security reasons.'
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'zone_type': 'safe',
+                'zone_name': 'Safe Area',
+                'is_safe': True,
+                'message': 'You are in a safe zone',
+                'hindi_message': 'आप सुरक्षित क्षेत्र में हैं।',
+                'recommendation': 'Continue enjoying your journey safely.'
+            })
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/voice-alert/test', methods=['POST'])
 def test_voice_alert():
     """Test voice alert system"""
@@ -889,6 +937,8 @@ def toggle_voice_alerts():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    
+    
 
 @app.route('/live-users', methods=['GET'])
 def get_live_users():

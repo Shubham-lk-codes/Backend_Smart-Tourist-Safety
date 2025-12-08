@@ -1,5 +1,6 @@
 const UserManager = require('../blockchain/UserManager');
 
+
 const userManager = new UserManager();
 
 // Initialize when server starts
