@@ -1,4 +1,4 @@
-# backend/ml_model/anomaly_detector_simple.py
+# backend/ml_model/anomaly_detector_simple.py (Updated with Repeating Alerts)
 import pandas as pd
 import numpy as np
 import joblib
@@ -25,7 +25,7 @@ class TouristAnomalyDetector:
     def __init__(self, node_api_url="http://localhost:3000/api", 
                  mongo_uri="mongodb+srv://shubhamlonkar137_db_user:e9km9tp6Q7rdjbju@cluster0.zv3zhoi.mongodb.net/?appName=Cluster0"):
         """
-        Initialize anomaly detection system with MongoDB
+        Initialize anomaly detection system with MongoDB and Repeating Alerts
         """
         self.node_api_url = node_api_url
         self.mongo_uri = mongo_uri
@@ -38,7 +38,7 @@ class TouristAnomalyDetector:
         self.db = None
         self._connect_to_mongodb()
         
-        # Movement tracking
+        # Movement tracking with repeating alert support
         self.tourist_states = {}  # Track each tourist's state
         
         # Voice alert system
@@ -67,7 +67,7 @@ class TouristAnomalyDetector:
         # Check if audio files exist
         self._check_audio_files()
         
-        # Configuration
+        # Configuration - Updated with repeating alert settings
         self.config = {
             'stationary_threshold': 300,  # 5 minutes
             'suspicious_speed': 15.0,     # m/s
@@ -75,6 +75,7 @@ class TouristAnomalyDetector:
             'phone_off_threshold': 300,   # 5 minutes
             'geofence_buffer': 50,        # meters
             'voice_alert_cooldown': 60,   # 1 minute cooldown between voice alerts
+            'repeating_alert_interval': 5,  # 5 seconds between repeating alerts
             'voice_volume': 0.7,          # Volume level (0.0 to 1.0)
         }
         
@@ -82,6 +83,7 @@ class TouristAnomalyDetector:
         self._initialize_model()
         print(f"🤖 TouristAnomalyDetector initialized. Node API: {node_api_url}")
         print(f"🔊 Pre-recorded Voice Alerts: Enabled")
+        print(f"⏱️ Repeating Alerts: Every {self.config['repeating_alert_interval']} seconds")
         print(f"💬 Language: Hindi")
         
         # Play welcome message
@@ -286,7 +288,8 @@ class TouristAnomalyDetector:
                 'speed': activity_data.get('speed', 0),
                 'anomaly_score': activity_data.get('anomaly_score', 0),
                 'is_anomalous': activity_data.get('is_anomalous', False),
-                'phone_status': activity_data.get('phone_status', 'online')
+                'phone_status': activity_data.get('phone_status', 'online'),
+                'current_zone': activity_data.get('current_zone', 'safe')
             }
             
             # Update or insert
@@ -462,7 +465,7 @@ class TouristAnomalyDetector:
     
     def process_location_update(self, tourist_id, lat, lng, timestamp=None, speed=None):
         """
-        Process new location update for a tourist
+        Process new location update for a tourist with repeating alerts
         Returns: anomaly analysis
         """
         if timestamp is None:
@@ -481,7 +484,11 @@ class TouristAnomalyDetector:
                 'phone_status': 'online',
                 'movement_history': [],
                 'tourist_name': tourist_info.get('name', 'Unknown') if tourist_info else 'Unknown',
-                'last_voice_alert_time': 0
+                'last_voice_alert_time': 0,
+                'current_zone': 'safe',
+                'entered_unsafe_zone_at': None,
+                'last_repeating_alert_time': 0,
+                'repeating_alert_active': False
             }
         
         state = self.tourist_states[tourist_id]
@@ -555,27 +562,64 @@ class TouristAnomalyDetector:
         else:
             state['phone_status'] = 'online'
         
-        # 3. Check geofence violations using MongoDB
+        # 3. Check geofence violations using MongoDB (WITH REPEATING ALERTS)
         violating_geofence = self._check_geofence_violation(lat, lng)
+        previous_zone = state['current_zone']
+        
         if violating_geofence:
             zone_name = violating_geofence.get('name', 'Restricted Area')
             zone_type = violating_geofence.get('zone_type', 'restricted')
             
-            alert_msg = f"🚫 ENTERED RESTRICTED ZONE: {zone_name}"
-            alerts.append(alert_msg)
+            # Update zone state
+            state['current_zone'] = zone_type
             
-            # Play appropriate audio alert with cooldown
-            current_time = time.time()
-            if (self.voice_alerts_enabled and 
-                current_time - state.get('last_voice_alert_time', 0) > self.config['voice_alert_cooldown']):
-                if zone_type == 'unsafe':
-                    if self._play_audio_file('unsafe_zone'):
-                        voice_alerts_sent.append("unsafe_zone_alert")
+            # Check if user just entered unsafe/restricted zone
+            if zone_type in ['unsafe', 'restricted'] and previous_zone == 'safe':
+                state['entered_unsafe_zone_at'] = timestamp
+                state['last_repeating_alert_time'] = 0
+                state['repeating_alert_active'] = True
+                alert_msg = f"🚫 ENTERED {zone_type.upper()} ZONE: {zone_name}"
+                alerts.append(alert_msg)
+                
+                # Play initial alert
+                current_time = time.time()
+                alert_type = 'unsafe_zone' if zone_type == 'unsafe' else 'restricted_zone'
+                if self.voice_alerts_enabled:
+                    if self._play_audio_file(alert_type):
+                        voice_alerts_sent.append(f"{alert_type}_initial")
                         state['last_voice_alert_time'] = current_time
-                else:
-                    if self._play_audio_file('restricted_zone'):
-                        voice_alerts_sent.append("restricted_zone_alert")
-                        state['last_voice_alert_time'] = current_time
+                        state['last_repeating_alert_time'] = current_time
+            
+            # User is already in unsafe zone - check for repeating alert
+            elif zone_type in ['unsafe', 'restricted'] and previous_zone == zone_type:
+                current_time = time.time()
+                
+                # Check if it's time for repeating alert (every 5 seconds)
+                if current_time - state.get('last_repeating_alert_time', 0) >= self.config['repeating_alert_interval']:
+                    alert_type = 'unsafe_zone' if zone_type == 'unsafe' else 'restricted_zone'
+                    if self.voice_alerts_enabled:
+                        if self._play_audio_file(alert_type):
+                            voice_alerts_sent.append(f"{alert_type}_repeating")
+                            state['last_repeating_alert_time'] = current_time
+                            alerts.append(f"🔁 REPEATING ALERT: Still in {zone_type.upper()} zone")
+            
+            # Zone changed (e.g., from unsafe to restricted)
+            elif zone_type in ['unsafe', 'restricted'] and previous_zone != zone_type:
+                state['entered_unsafe_zone_at'] = timestamp
+                state['last_repeating_alert_time'] = 0
+                alert_msg = f"🔄 ZONE CHANGED TO {zone_type.upper()}: {zone_name}"
+                alerts.append(alert_msg)
+        
+        else:
+            # User is not in any restricted zone
+            state['current_zone'] = 'safe'
+            
+            # Check if user just left unsafe zone
+            if previous_zone in ['unsafe', 'restricted']:
+                state['entered_unsafe_zone_at'] = None
+                state['repeating_alert_active'] = False
+                alert_msg = f"✅ RETURNED TO SAFE ZONE"
+                alerts.append(alert_msg)
         
         # 4. ML anomaly detection
         if len(state['movement_history']) >= 5 and self.is_trained:
@@ -608,6 +652,11 @@ class TouristAnomalyDetector:
             except Exception as e:
                 print(f"ML detection error: {e}")
         
+        # Calculate unsafe zone duration
+        unsafe_zone_duration = 0
+        if state['entered_unsafe_zone_at']:
+            unsafe_zone_duration = timestamp - state['entered_unsafe_zone_at']
+        
         # Prepare activity data for database
         activity_data = {
             'tourist_id': tourist_id,
@@ -624,6 +673,9 @@ class TouristAnomalyDetector:
             'is_anomalous': is_anomalous,
             'alerts': alerts,
             'voice_alerts': voice_alerts_sent,
+            'current_zone': state['current_zone'],
+            'repeating_alert_active': state['repeating_alert_active'],
+            'unsafe_zone_duration': unsafe_zone_duration,
             'timestamp': datetime.fromtimestamp(timestamp),
             'processed_at': datetime.now(),
             'phone_status': state['phone_status'],
@@ -645,13 +697,20 @@ class TouristAnomalyDetector:
             'alerts': alerts,
             'voice_alerts': voice_alerts_sent,
             'location': {'lat': lat, 'lng': lng},
+            'current_zone': state['current_zone'],
+            'repeating_alert_active': state['repeating_alert_active'],
+            'unsafe_zone_duration': unsafe_zone_duration,
             'timestamp': datetime.fromtimestamp(timestamp).isoformat(),
             'activity_saved': activity_saved,
             'history_size': len(state['movement_history']),
             'phone_status': state['phone_status'],
             'speed': speed if speed else 0,
             'database_connected': self.db is not None,
-            'voice_alert_played': len(voice_alerts_sent) > 0
+            'voice_alert_played': len(voice_alerts_sent) > 0,
+            'needs_repeating_alert': (
+                state['current_zone'] in ['unsafe', 'restricted'] and
+                timestamp - state.get('last_repeating_alert_time', 0) >= self.config['repeating_alert_interval']
+            )
         }
     
     def _send_alerts_to_node(self, tourist_id, alerts, lat, lng):
@@ -681,6 +740,49 @@ class TouristAnomalyDetector:
             
             except Exception as e:
                 print(f"Alert sending error: {e}")
+    
+    def get_tourist_state(self, tourist_id):
+        """Get current state of a tourist"""
+        if tourist_id in self.tourist_states:
+            return self.tourist_states[tourist_id]
+        return None
+    
+    def trigger_repeating_alert(self, tourist_id, alert_type='unsafe_zone'):
+        """Manually trigger a repeating alert"""
+        try:
+            if not self.voice_alerts_enabled:
+                return False
+            
+            if alert_type not in self.audio_files:
+                print(f"❌ Invalid alert type: {alert_type}")
+                return False
+            
+            # Play the alert
+            success = self._play_audio_file(alert_type)
+            
+            # Update tourist state
+            if tourist_id in self.tourist_states:
+                self.tourist_states[tourist_id]['last_repeating_alert_time'] = time.time()
+                self.tourist_states[tourist_id]['repeating_alert_active'] = True
+            
+            return success
+            
+        except Exception as e:
+            print(f"Error triggering repeating alert: {e}")
+            return False
+    
+    def stop_repeating_alert(self, tourist_id):
+        """Stop repeating alerts for a tourist"""
+        try:
+            if tourist_id in self.tourist_states:
+                self.tourist_states[tourist_id]['repeating_alert_active'] = False
+                self.tourist_states[tourist_id]['current_zone'] = 'safe'
+                self.tourist_states[tourist_id]['entered_unsafe_zone_at'] = None
+                return True
+            return False
+        except Exception as e:
+            print(f"Error stopping repeating alert: {e}")
+            return False
     
     def send_test_voice_alert(self):
         """Send a test voice alert"""
@@ -740,9 +842,20 @@ class TouristAnomalyDetector:
     
     def get_system_status(self):
         """Get system status"""
+        # Count tourists in unsafe zones
+        unsafe_tourists = 0
+        repeating_alerts_active = 0
+        for tourist_id, state in self.tourist_states.items():
+            if state.get('current_zone') in ['unsafe', 'restricted']:
+                unsafe_tourists += 1
+            if state.get('repeating_alert_active'):
+                repeating_alerts_active += 1
+        
         return {
             'is_trained': self.is_trained,
             'tourists_tracking': len(self.tourist_states),
+            'unsafe_tourists': unsafe_tourists,
+            'repeating_alerts_active': repeating_alerts_active,
             'config': self.config,
             'model_ready': self.model is not None,
             'database_connected': self.db is not None,
@@ -774,6 +887,7 @@ try:
     detector = TouristAnomalyDetector()
     print("✅ ML Detector initialized successfully with MongoDB")
     print("🔊 Pre-recorded Voice alert system ready")
+    print(f"⏱️ Repeating alert interval: {detector.config['repeating_alert_interval']} seconds")
 except Exception as e:
     print(f"❌ Failed to initialize ML Detector: {e}")
     detector = None
@@ -783,10 +897,12 @@ def health():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy' if detector else 'unhealthy',
-        'service': 'ML Anomaly Detection with Pre-recorded Voice Alerts',
+        'service': 'ML Anomaly Detection with Repeating Voice Alerts',
         'model_ready': detector.is_trained if detector else False,
         'database_connected': detector.db is not None if detector else False,
         'voice_alerts': detector.voice_alerts_enabled if detector else False,
+        'repeating_alerts': True,
+        'repeating_interval': detector.config['repeating_alert_interval'] if detector else 5,
         'hindi_voice': True,
         'audio_system': pygame.mixer.get_init() is not None if detector else False,
         'timestamp': datetime.now().isoformat()
@@ -840,7 +956,9 @@ def detect():
         return jsonify({
             'success': True,
             'result': result,
-            'voice_alert_played': result.get('voice_alert_played', False)
+            'voice_alert_played': result.get('voice_alert_played', False),
+            'repeating_alert_active': result.get('repeating_alert_active', False),
+            'needs_repeating_alert': result.get('needs_repeating_alert', False)
         })
     
     except Exception as e:
@@ -869,10 +987,16 @@ def check_zone():
             zone_type = violating_geofence.get('zone_type', 'restricted')
             zone_name = violating_geofence.get('name', 'Restricted Area')
             
+            # Get tourist state
+            tourist_state = detector.get_tourist_state(tourist_id)
+            previous_zone = tourist_state.get('current_zone', 'safe') if tourist_state else 'safe'
+            
             # Trigger voice alert if in unsafe/restricted zone
             if zone_type in ['unsafe', 'restricted']:
                 alert_type = 'unsafe_zone' if zone_type == 'unsafe' else 'restricted_zone'
-                if detector.voice_alerts_enabled:
+                
+                # If just entered unsafe zone, trigger alert
+                if previous_zone == 'safe' and detector.voice_alerts_enabled:
                     detector._play_audio_file(alert_type)
             
             return jsonify({
@@ -880,6 +1004,8 @@ def check_zone():
                 'zone_type': zone_type,
                 'zone_name': zone_name,
                 'is_safe': False,
+                'previous_zone': previous_zone,
+                'repeating_alert_needed': True,
                 'message': f'You are in {zone_name} ({zone_type} zone)',
                 'hindi_message': 'चेतावनी! आप असुरक्षित क्षेत्र में हैं।' if zone_type == 'unsafe' else 'सतर्क! यह प्रतिबंधित क्षेत्र है।',
                 'recommendation': 'Please exit immediately for your safety.' if zone_type == 'unsafe' else 'Entry prohibited for security reasons.'
@@ -895,6 +1021,105 @@ def check_zone():
                 'recommendation': 'Continue enjoying your journey safely.'
             })
             
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/repeating-alert/status/<tourist_id>', methods=['GET'])
+def get_repeating_alert_status(tourist_id):
+    """Get repeating alert status for a tourist"""
+    try:
+        if not detector:
+            return jsonify({'error': 'Detector not available'}), 503
+        
+        tourist_state = detector.get_tourist_state(tourist_id)
+        current_time = time.time()
+        
+        if tourist_state:
+            needs_alert = (
+                tourist_state.get('current_zone') in ['unsafe', 'restricted'] and
+                tourist_state.get('repeating_alert_active', False) and
+                current_time - tourist_state.get('last_repeating_alert_time', 0) >= detector.config['repeating_alert_interval']
+            )
+            
+            return jsonify({
+                'success': True,
+                'tourist_id': tourist_id,
+                'current_zone': tourist_state.get('current_zone', 'safe'),
+                'repeating_alert_active': tourist_state.get('repeating_alert_active', False),
+                'entered_unsafe_zone_at': tourist_state.get('entered_unsafe_zone_at'),
+                'last_repeating_alert_time': tourist_state.get('last_repeating_alert_time', 0),
+                'needs_repeating_alert': needs_alert,
+                'time_since_last_alert': current_time - tourist_state.get('last_repeating_alert_time', 0) if tourist_state.get('last_repeating_alert_time') else None,
+                'alert_type': 'unsafe_zone' if tourist_state.get('current_zone') == 'unsafe' else 'restricted_zone' if tourist_state.get('current_zone') == 'restricted' else None
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'tourist_id': tourist_id,
+                'current_zone': 'safe',
+                'repeating_alert_active': False,
+                'entered_unsafe_zone_at': None,
+                'last_repeating_alert_time': 0,
+                'needs_repeating_alert': False,
+                'alert_type': None
+            })
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/repeating-alert/trigger', methods=['POST'])
+def trigger_repeating_alert():
+    """Trigger a repeating alert for a tourist"""
+    try:
+        if not detector:
+            return jsonify({'error': 'ML detector not available'}), 503
+        
+        data = request.get_json()
+        tourist_id = data.get('tourist_id')
+        alert_type = data.get('alert_type', 'unsafe_zone')
+        
+        if not tourist_id:
+            return jsonify({'error': 'Tourist ID required'}), 400
+        
+        # Check if alert type is valid
+        if alert_type not in ['unsafe_zone', 'restricted_zone']:
+            return jsonify({'error': 'Invalid alert type'}), 400
+        
+        # Trigger the repeating alert
+        success = detector.trigger_repeating_alert(tourist_id, alert_type)
+        
+        return jsonify({
+            'success': success,
+            'message': 'Repeating alert triggered successfully',
+            'alert_type': alert_type,
+            'hindi_message': 'दोहराव चेतावनी ट्रिगर की गई'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/repeating-alert/stop', methods=['POST'])
+def stop_repeating_alert():
+    """Stop repeating alerts for a tourist"""
+    try:
+        if not detector:
+            return jsonify({'error': 'ML detector not available'}), 503
+        
+        data = request.get_json()
+        tourist_id = data.get('tourist_id')
+        
+        if not tourist_id:
+            return jsonify({'error': 'Tourist ID required'}), 400
+        
+        # Stop the repeating alert
+        success = detector.stop_repeating_alert(tourist_id)
+        
+        return jsonify({
+            'success': success,
+            'message': 'Repeating alert stopped successfully',
+            'hindi_message': 'दोहराव चेतावनी बंद की गई'
+        })
+        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -937,8 +1162,6 @@ def toggle_voice_alerts():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    
-    
 
 @app.route('/live-users', methods=['GET'])
 def get_live_users():
@@ -1019,17 +1242,64 @@ def simulate():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/monitor-repeating-alerts', methods=['GET'])
+def monitor_repeating_alerts():
+    """Monitor all repeating alerts in the system"""
+    try:
+        if not detector:
+            return jsonify({'error': 'Detector not available'}), 503
+        
+        current_time = time.time()
+        alerts_info = []
+        
+        for tourist_id, state in detector.tourist_states.items():
+            if state.get('current_zone') in ['unsafe', 'restricted']:
+                time_in_zone = 0
+                if state.get('entered_unsafe_zone_at'):
+                    time_in_zone = current_time - state.get('entered_unsafe_zone_at')
+                
+                time_since_last_alert = 0
+                if state.get('last_repeating_alert_time'):
+                    time_since_last_alert = current_time - state.get('last_repeating_alert_time')
+                
+                needs_alert = time_since_last_alert >= detector.config['repeating_alert_interval']
+                
+                alerts_info.append({
+                    'tourist_id': tourist_id,
+                    'tourist_name': state.get('tourist_name', 'Unknown'),
+                    'current_zone': state.get('current_zone'),
+                    'time_in_zone': round(time_in_zone, 1),
+                    'time_since_last_alert': round(time_since_last_alert, 1),
+                    'needs_alert': needs_alert,
+                    'repeating_alert_active': state.get('repeating_alert_active', False),
+                    'location': state.get('last_location', (0, 0))
+                })
+        
+        return jsonify({
+            'success': True,
+            'timestamp': datetime.now().isoformat(),
+            'total_tourists': len(detector.tourist_states),
+            'unsafe_tourists': len(alerts_info),
+            'repeating_alerts': alerts_info,
+            'repeating_interval': detector.config['repeating_alert_interval']
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     port = int(os.environ.get('ML_PORT', 5001))
     print(f"\n{'='*60}")
-    print(f"🚀 ML Anomaly Detection API with PRE-RECORDED VOICE ALERTS")
+    print(f"🚀 ML Anomaly Detection API with REPEATING VOICE ALERTS")
     print(f"📡 Port: {port}")
     print(f"🔊 Voice Alerts: Pre-recorded Audio Files")
+    print(f"⏱️ Repeating Alerts: Every 5 seconds in unsafe zones")
     print(f"💬 Language: Hindi")
     print(f"📁 Audio Files Dir: {detector.audio_files_dir if detector else 'N/A'}")
     print(f"🌐 Frontend URL: http://localhost:5173")
     print(f"🔗 Backend API: http://localhost:3000/api")
-    print(f"\n📝 IMPORTANT: Ensure audio files are in .wav format")
+    print(f"\n📝 IMPORTANT: Audio files should be in .wav format")
+    print(f"📝 Repeating alerts automatically trigger every 5 seconds")
     print(f"{'='*60}\n")
     
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
