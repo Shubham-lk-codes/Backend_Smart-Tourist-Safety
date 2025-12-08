@@ -134,6 +134,17 @@ class UserManager {
       { new: true }
     );
   }
+  // Add this method to your UserManager class
+async findUserByEmail(email) {
+  try {
+    // Check if user exists in the blockchain
+    const users = await this.getAllUsers();
+    return users.find(user => user.email === email);
+  } catch (error) {
+    console.error('Error finding user by email:', error);
+    return null;
+  }
+}
 }
 
 module.exports = UserManager;
